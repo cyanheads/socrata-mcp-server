@@ -11,7 +11,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "socrata-mcp-server",
+      "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
       "version": "0.1.1",
       "packageArguments": [
@@ -47,7 +47,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "socrata-mcp-server",
+      "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
       "version": "0.1.1",
       "packageArguments": [
