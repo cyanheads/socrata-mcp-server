@@ -74,7 +74,7 @@ export type QueryDatasetOptions = {
 
 /** Result of a SoQL query. */
 export type QueryResult = {
-  rows: Record<string, string>[];
+  rows: Record<string, unknown>[];
   rowCount: number;
   totalCount?: number;
   assembledQuery: string;

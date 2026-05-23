@@ -5,9 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
+import type { QueryResult } from '@/services/socrata/types.js';
 import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 export const queryDataset = tool('socrata_query_dataset', {
@@ -72,9 +73,9 @@ export const queryDataset = tool('socrata_query_dataset', {
   }),
   output: z.object({
     rows: z
-      .array(z.record(z.string(), z.string()))
+      .array(z.record(z.string(), z.unknown()))
       .describe(
-        'Result rows. All SODA 2.1 values are strings — even numeric columns. Use column schema from socrata_get_dataset for type context.',
+        'Result rows. Scalar values are strings (SODA 2.1); geo/location columns return nested objects. Use column schema from socrata_get_dataset for type context.',
       ),
     row_count: z.number().describe('Rows returned in this response.'),
     total_count: z
@@ -152,21 +153,33 @@ export const queryDataset = tool('socrata_query_dataset', {
     const group = input.group && input.group.trim() ? input.group : undefined;
     const having = input.having && input.having.trim() ? input.having : undefined;
     const order = input.order && input.order.trim() ? input.order : undefined;
-    const qResult = await svc.queryDataset(
-      {
-        domain,
-        datasetId: input.dataset_id,
-        ...(search ? { search } : {}),
-        ...(select ? { select } : {}),
-        ...(where ? { where } : {}),
-        ...(group ? { group } : {}),
-        ...(having ? { having } : {}),
-        ...(order ? { order } : {}),
-        limit: input.limit,
-        offset: input.offset,
-      },
-      ctx,
-    );
+    let qResult: QueryResult;
+    try {
+      qResult = await svc.queryDataset(
+        {
+          domain,
+          datasetId: input.dataset_id,
+          ...(search ? { search } : {}),
+          ...(select ? { select } : {}),
+          ...(where ? { where } : {}),
+          ...(group ? { group } : {}),
+          ...(having ? { having } : {}),
+          ...(order ? { order } : {}),
+          limit: input.limit,
+          offset: input.offset,
+        },
+        ctx,
+      );
+    } catch (err) {
+      if (
+        err instanceof McpError &&
+        err.code === JsonRpcErrorCode.NotFound &&
+        (err.data as Record<string, unknown> | undefined)?.reason === 'not_found'
+      ) {
+        throw ctx.fail('not_found', err.message, { ...ctx.recoveryFor('not_found') });
+      }
+      throw err;
+    }
 
     // Attempt DataCanvas spillover when canvas is available and result hit the limit.
     let canvasId: string | undefined;
@@ -232,7 +245,11 @@ export const queryDataset = tool('socrata_query_dataset', {
       lines.push(`| ${cols.join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
       for (const row of result.rows.slice(0, 50)) {
-        const cells = cols.map((c) => String(row[c] ?? '').replace(/\|/g, '\\|'));
+        const cells = cols.map((c) => {
+          const v = row[c];
+          const s = v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+          return s.replace(/\|/g, '\\|');
+        });
         lines.push(`| ${cells.join(' | ')} |`);
       }
       if (result.rows.length > 50) {

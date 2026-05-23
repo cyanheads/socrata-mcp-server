@@ -24,6 +24,57 @@ import { DATASET_ID_PATTERN } from './types.js';
 /** Discovery API base URL (cross-portal). */
 const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
 
+/**
+ * Curated list of well-known Socrata portals.
+ * The Discovery API no longer exposes a /domains listing endpoint (returns 404).
+ */
+const KNOWN_PORTALS: PortalEntry[] = [
+  { domain: 'data.cityofnewyork.us', organization: 'City of New York', datasetCount: 0 },
+  { domain: 'data.seattle.gov', organization: 'City of Seattle', datasetCount: 0 },
+  { domain: 'data.cityofchicago.org', organization: 'City of Chicago', datasetCount: 0 },
+  { domain: 'data.sfgov.org', organization: 'City and County of San Francisco', datasetCount: 0 },
+  { domain: 'data.lacity.org', organization: 'City of Los Angeles', datasetCount: 0 },
+  { domain: 'data.boston.gov', organization: 'City of Boston', datasetCount: 0 },
+  { domain: 'data.austintexas.gov', organization: 'City of Austin, TX', datasetCount: 0 },
+  { domain: 'data.baltimorecity.gov', organization: 'City of Baltimore', datasetCount: 0 },
+  { domain: 'data.nashville.gov', organization: 'City of Nashville', datasetCount: 0 },
+  { domain: 'data.detroitmi.gov', organization: 'City of Detroit', datasetCount: 0 },
+  { domain: 'data.cityofmadison.com', organization: 'City of Madison, WI', datasetCount: 0 },
+  { domain: 'data.colorado.gov', organization: 'State of Colorado', datasetCount: 0 },
+  { domain: 'data.ny.gov', organization: 'State of New York', datasetCount: 0 },
+  { domain: 'data.texas.gov', organization: 'State of Texas', datasetCount: 0 },
+  { domain: 'data.wa.gov', organization: 'State of Washington', datasetCount: 0 },
+  { domain: 'data.oregon.gov', organization: 'State of Oregon', datasetCount: 0 },
+  { domain: 'data.illinois.gov', organization: 'State of Illinois', datasetCount: 0 },
+  { domain: 'data.maryland.gov', organization: 'State of Maryland', datasetCount: 0 },
+  { domain: 'data.michigan.gov', organization: 'State of Michigan', datasetCount: 0 },
+  { domain: 'data.ohio.gov', organization: 'State of Ohio', datasetCount: 0 },
+  { domain: 'data.ct.gov', organization: 'State of Connecticut', datasetCount: 0 },
+  { domain: 'data.iowa.gov', organization: 'State of Iowa', datasetCount: 0 },
+  { domain: 'data.hawaii.gov', organization: 'State of Hawaii', datasetCount: 0 },
+  { domain: 'data.kcmo.org', organization: 'City of Kansas City, MO', datasetCount: 0 },
+  { domain: 'data.montgomerycountymd.gov', organization: 'Montgomery County, MD', datasetCount: 0 },
+  { domain: 'opendata.dc.gov', organization: 'District of Columbia', datasetCount: 0 },
+  { domain: 'data.gov', organization: 'U.S. Federal Government (data.gov)', datasetCount: 0 },
+  {
+    domain: 'data.cdc.gov',
+    organization: 'Centers for Disease Control and Prevention',
+    datasetCount: 0,
+  },
+  {
+    domain: 'data.hhs.gov',
+    organization: 'U.S. Dept. of Health and Human Services',
+    datasetCount: 0,
+  },
+  { domain: 'data.cityofsacramento.org', organization: 'City of Sacramento', datasetCount: 0 },
+  { domain: 'data.sandiego.gov', organization: 'City of San Diego', datasetCount: 0 },
+  { domain: 'data.mesaaz.gov', organization: 'City of Mesa, AZ', datasetCount: 0 },
+  { domain: 'data.tucsonaz.gov', organization: 'City of Tucson, AZ', datasetCount: 0 },
+  { domain: 'data.opendatasoft.com', organization: 'OpenDataSoft', datasetCount: 0 },
+  { domain: 'opendata.minneapolismn.gov', organization: 'City of Minneapolis', datasetCount: 0 },
+  { domain: 'data.cityoflewisville.com', organization: 'City of Lewisville, TX', datasetCount: 0 },
+];
+
 export class SocrataService {
   /** Build the default request headers, optionally adding the app token. */
   private buildHeaders(): Record<string, string> {
@@ -66,15 +117,11 @@ export class SocrataService {
 
           if (sodaErr) {
             // Map SODA error codes to appropriate MCP errors.
-            const code = sodaErr.code ?? '';
-            if (
-              code.includes('no-such-column') ||
-              code.includes('query.soql') ||
-              code.includes('query.unknown')
-            ) {
+            if (response.status === 400) {
+              // All 400s with a SODA body are SoQL/query errors — propagate upstream message.
               throw validationError(`SoQL error: ${sodaErr.message}`, {
                 reason: 'soql_error',
-                socrataCode: code,
+                socrataCode: sodaErr.code ?? '',
               });
             }
             if (response.status === 429) {
@@ -203,16 +250,33 @@ export class SocrataService {
 
     const rawColumns = Array.isArray(raw['columns']) ? (raw['columns'] as unknown[]) : [];
 
+    /** Socrata geo/spatial column type names (dataTypeName or renderTypeName). */
+    const GEO_TYPES = new Set([
+      'location',
+      'point',
+      'polygon',
+      'line',
+      'multipoint',
+      'multiline',
+      'multipolygon',
+      'geo_entity',
+      'geometry',
+    ]);
+
     const columns: DatasetColumn[] = rawColumns
       .map((c): DatasetColumn | null => {
         const col = c as Record<string, unknown>;
         const fieldName = String(col['fieldName'] ?? col['name'] ?? '');
-        // Filter out computed region columns (geospatial join artifacts).
+        const dataType = String(col['dataTypeName'] ?? col['renderTypeName'] ?? 'text');
+        // Filter out computed region columns (geospatial join artifacts), but keep
+        // actual geo-typed columns even when their fieldName uses a system prefix.
         if (fieldName.startsWith(':@computed_region_')) return null;
+        // Keep columns with empty fieldName only if they have a known geo type.
+        if (!fieldName && !GEO_TYPES.has(dataType.toLowerCase())) return null;
         const cachedContents = (col['cachedContents'] ?? {}) as Record<string, unknown>;
         return {
-          fieldName,
-          dataType: String(col['dataTypeName'] ?? col['renderTypeName'] ?? 'text'),
+          fieldName: fieldName || dataType,
+          dataType,
           ...(col['description'] ? { description: String(col['description']) } : {}),
           ...(cachedContents['non_null'] != null
             ? { nonNullCount: Number(cachedContents['non_null']) }
@@ -295,7 +359,7 @@ export class SocrataService {
     ctx.log.debug('SoQL query', { domain: opts.domain, datasetId: opts.datasetId });
 
     // Fetch data rows.
-    const rows = await this.fetchJson<Record<string, string>[]>(dataUrl, ctx);
+    const rows = await this.fetchJson<Record<string, unknown>[]>(dataUrl, ctx);
 
     // Fetch total count separately when result is at the limit (may be truncated).
     let totalCount: number | undefined;
@@ -324,21 +388,9 @@ export class SocrataService {
     };
   }
 
-  /** List all known Socrata portals from the Discovery API domains endpoint. */
-  async listPortals(ctx: Context): Promise<PortalEntry[]> {
-    const url = `${DISCOVERY_BASE}/domains`;
-    ctx.log.debug('Listing Socrata portals');
-
-    const raw = await this.fetchJson<{ results: unknown[] }>(url, ctx);
-
-    return (raw.results ?? []).map((r): PortalEntry => {
-      const item = r as Record<string, unknown>;
-      return {
-        domain: String(item['domain'] ?? ''),
-        ...(item['organization'] ? { organization: String(item['organization']) } : {}),
-        datasetCount: typeof item['count'] === 'number' ? item['count'] : 0,
-      };
-    });
+  /** Return a curated static list of well-known Socrata portals. */
+  listPortals(_ctx: Context): Promise<PortalEntry[]> {
+    return Promise.resolve(KNOWN_PORTALS);
   }
 }
 

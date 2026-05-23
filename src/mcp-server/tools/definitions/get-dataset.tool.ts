@@ -4,9 +4,10 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
+import type { DatasetMetadata } from '@/services/socrata/types.js';
 import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 export const getDataset = tool('socrata_get_dataset', {
@@ -95,7 +96,19 @@ export const getDataset = tool('socrata_get_dataset', {
     ctx.log.info('Fetching dataset metadata', { domain, datasetId: input.dataset_id });
 
     const svc = getSocrataService();
-    const meta = await svc.getDataset(domain, input.dataset_id, ctx);
+    let meta: DatasetMetadata;
+    try {
+      meta = await svc.getDataset(domain, input.dataset_id, ctx);
+    } catch (err) {
+      if (
+        err instanceof McpError &&
+        err.code === JsonRpcErrorCode.NotFound &&
+        (err.data as Record<string, unknown> | undefined)?.reason === 'not_found'
+      ) {
+        throw ctx.fail('not_found', err.message, { ...ctx.recoveryFor('not_found') });
+      }
+      throw err;
+    }
 
     return {
       dataset_id: meta.datasetId,
