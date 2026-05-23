@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "socrata-mcp-server",
-  "description": "",
+  "name": "cyanheads/socrata-mcp-server",
+  "description": "MCP server wrapping the Socrata SODA 2.1 API and Discovery API for government open data.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/socrata-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",
@@ -25,6 +25,19 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "SOCRATA_APP_TOKEN",
+          "description": "Socrata app token for higher rate limits. Free to register at any portal. Without a token, requests share a throttled pool per source IP.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "SOCRATA_DEFAULT_DOMAIN",
+          "description": "Default portal domain when domain is omitted from tool calls (e.g. data.seattle.gov).",
+          "format": "string",
+          "isRequired": false,
+          "default": "data.seattle.gov"
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
