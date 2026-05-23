@@ -74,8 +74,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       };
     }
 
-    const canvasIdInput =
-      input.canvas_id && input.canvas_id.trim() ? input.canvas_id.trim() : undefined;
+    const canvasIdInput = input.canvas_id?.trim() ? input.canvas_id.trim() : undefined;
     const instance = await canvas.acquire(canvasIdInput, ctx);
     const tableInfos = await instance.describe();
 

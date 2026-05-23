@@ -75,6 +75,19 @@ const KNOWN_PORTALS: PortalEntry[] = [
   { domain: 'data.cityoflewisville.com', organization: 'City of Lewisville, TX', datasetCount: 0 },
 ];
 
+/** Socrata geo/spatial column type names (dataTypeName or renderTypeName). */
+const GEO_TYPES = new Set([
+  'location',
+  'point',
+  'polygon',
+  'line',
+  'multipoint',
+  'multiline',
+  'multipolygon',
+  'geo_entity',
+  'geometry',
+]);
+
 export class SocrataService {
   /** Build the default request headers, optionally adding the app token. */
   private buildHeaders(): Record<string, string> {
@@ -191,38 +204,34 @@ export class SocrataService {
 
     const results = (raw.results ?? []).map((r): DiscoveryResult => {
       const item = r as Record<string, unknown>;
-      const resource = (item['resource'] ?? {}) as Record<string, unknown>;
-      const classification = (item['classification'] ?? {}) as Record<string, unknown>;
-      const metadata = (item['metadata'] ?? {}) as Record<string, unknown>;
+      const resource = (item.resource ?? {}) as Record<string, unknown>;
+      const classification = (item.classification ?? {}) as Record<string, unknown>;
+      const metadata = (item.metadata ?? {}) as Record<string, unknown>;
 
-      const id = String(resource['id'] ?? '');
-      const domainCname = String(metadata['domain'] ?? '');
+      const id = String(resource.id ?? '');
+      const domainCname = String(metadata.domain ?? '');
 
       return {
         datasetId: id,
         domain: domainCname,
-        name: String(resource['name'] ?? ''),
-        ...(resource['description'] ? { description: String(resource['description']) } : {}),
-        ...(classification['domain_category']
-          ? { category: String(classification['domain_category']) }
+        name: String(resource.name ?? ''),
+        ...(resource.description ? { description: String(resource.description) } : {}),
+        ...(classification.domain_category
+          ? { category: String(classification.domain_category) }
           : {}),
-        tags: Array.isArray(classification['domain_tags'])
-          ? (classification['domain_tags'] as string[])
+        tags: Array.isArray(classification.domain_tags)
+          ? (classification.domain_tags as string[])
           : [],
-        columnNames: Array.isArray(resource['columns_name'])
-          ? (resource['columns_name'] as string[])
+        columnNames: Array.isArray(resource.columns_name)
+          ? (resource.columns_name as string[])
           : [],
-        ...(resource['license'] ? { license: String(resource['license']) } : {}),
-        ...(resource['data_updated_at']
-          ? { dataUpdatedAt: String(resource['data_updated_at']) }
-          : {}),
-        ...(typeof resource['page_views'] === 'object' &&
-        resource['page_views'] !== null &&
-        'page_views_total' in (resource['page_views'] as Record<string, unknown>)
+        ...(resource.license ? { license: String(resource.license) } : {}),
+        ...(resource.data_updated_at ? { dataUpdatedAt: String(resource.data_updated_at) } : {}),
+        ...(typeof resource.page_views === 'object' &&
+        resource.page_views !== null &&
+        'page_views_total' in (resource.page_views as Record<string, unknown>)
           ? {
-              viewCount: Number(
-                (resource['page_views'] as Record<string, unknown>)['page_views_total'],
-              ),
+              viewCount: Number((resource.page_views as Record<string, unknown>).page_views_total),
             }
           : {}),
       };
@@ -248,38 +257,25 @@ export class SocrataService {
 
     const raw = await this.fetchJson<Record<string, unknown>>(url, ctx);
 
-    const rawColumns = Array.isArray(raw['columns']) ? (raw['columns'] as unknown[]) : [];
-
-    /** Socrata geo/spatial column type names (dataTypeName or renderTypeName). */
-    const GEO_TYPES = new Set([
-      'location',
-      'point',
-      'polygon',
-      'line',
-      'multipoint',
-      'multiline',
-      'multipolygon',
-      'geo_entity',
-      'geometry',
-    ]);
+    const rawColumns = Array.isArray(raw.columns) ? (raw.columns as unknown[]) : [];
 
     const columns: DatasetColumn[] = rawColumns
       .map((c): DatasetColumn | null => {
         const col = c as Record<string, unknown>;
-        const fieldName = String(col['fieldName'] ?? col['name'] ?? '');
-        const dataType = String(col['dataTypeName'] ?? col['renderTypeName'] ?? 'text');
+        const fieldName = String(col.fieldName ?? col.name ?? '');
+        const dataType = String(col.dataTypeName ?? col.renderTypeName ?? 'text');
         // Filter out computed region columns (geospatial join artifacts), but keep
         // actual geo-typed columns even when their fieldName uses a system prefix.
         if (fieldName.startsWith(':@computed_region_')) return null;
         // Keep columns with empty fieldName only if they have a known geo type.
         if (!fieldName && !GEO_TYPES.has(dataType.toLowerCase())) return null;
-        const cachedContents = (col['cachedContents'] ?? {}) as Record<string, unknown>;
+        const cachedContents = (col.cachedContents ?? {}) as Record<string, unknown>;
         return {
           fieldName: fieldName || dataType,
           dataType,
-          ...(col['description'] ? { description: String(col['description']) } : {}),
-          ...(cachedContents['non_null'] != null
-            ? { nonNullCount: Number(cachedContents['non_null']) }
+          ...(col.description ? { description: String(col.description) } : {}),
+          ...(cachedContents.non_null != null
+            ? { nonNullCount: Number(cachedContents.non_null) }
             : {}),
         };
       })
@@ -288,21 +284,21 @@ export class SocrataService {
     return {
       datasetId,
       domain,
-      name: String(raw['name'] ?? ''),
-      ...(raw['description'] ? { description: String(raw['description']) } : {}),
-      ...(raw['category'] ? { category: String(raw['category']) } : {}),
-      tags: Array.isArray(raw['tags']) ? (raw['tags'] as string[]) : [],
-      ...(raw['rowsUpdatedAt']
-        ? { dataUpdatedAt: new Date(Number(raw['rowsUpdatedAt']) * 1000).toISOString() }
+      name: String(raw.name ?? ''),
+      ...(raw.description ? { description: String(raw.description) } : {}),
+      ...(raw.category ? { category: String(raw.category) } : {}),
+      tags: Array.isArray(raw.tags) ? (raw.tags as string[]) : [],
+      ...(raw.rowsUpdatedAt
+        ? { dataUpdatedAt: new Date(Number(raw.rowsUpdatedAt) * 1000).toISOString() }
         : {}),
-      ...(raw['license']
-        ? { license: String((raw['license'] as Record<string, unknown>)['name'] ?? raw['license']) }
+      ...(raw.license
+        ? { license: String((raw.license as Record<string, unknown>).name ?? raw.license) }
         : {}),
-      ...(raw['cachedContents']
+      ...(raw.cachedContents
         ? {
             rowCount: Number(
-              (raw['cachedContents'] as Record<string, unknown>)['total_rows'] ??
-                (raw['cachedContents'] as Record<string, unknown>)['rows_reviewed'] ??
+              (raw.cachedContents as Record<string, unknown>).total_rows ??
+                (raw.cachedContents as Record<string, unknown>).rows_reviewed ??
                 0,
             ),
           }
@@ -322,38 +318,15 @@ export class SocrataService {
 
     const limit = Math.min(opts.limit ?? 100, 5000);
     const params = new URLSearchParams();
-    const queryParts: string[] = [];
 
-    if (opts.select) {
-      params.set('$select', opts.select);
-      queryParts.push(`$select=${opts.select}`);
-    }
-    if (opts.search) {
-      params.set('$q', opts.search);
-      queryParts.push(`$q=${opts.search}`);
-    }
-    if (opts.where) {
-      params.set('$where', opts.where);
-      queryParts.push(`$where=${opts.where}`);
-    }
-    if (opts.group) {
-      params.set('$group', opts.group);
-      queryParts.push(`$group=${opts.group}`);
-    }
-    if (opts.having) {
-      params.set('$having', opts.having);
-      queryParts.push(`$having=${opts.having}`);
-    }
-    if (opts.order) {
-      params.set('$order', opts.order);
-      queryParts.push(`$order=${opts.order}`);
-    }
+    if (opts.select) params.set('$select', opts.select);
+    if (opts.search) params.set('$q', opts.search);
+    if (opts.where) params.set('$where', opts.where);
+    if (opts.group) params.set('$group', opts.group);
+    if (opts.having) params.set('$having', opts.having);
+    if (opts.order) params.set('$order', opts.order);
     params.set('$limit', String(limit));
-    queryParts.push(`$limit=${limit}`);
-    if (opts.offset) {
-      params.set('$offset', String(opts.offset));
-      queryParts.push(`$offset=${opts.offset}`);
-    }
+    if (opts.offset) params.set('$offset', String(opts.offset));
 
     const dataUrl = `https://${opts.domain}/resource/${opts.datasetId}.json?${params.toString()}`;
     ctx.log.debug('SoQL query', { domain: opts.domain, datasetId: opts.datasetId });
@@ -379,12 +352,18 @@ export class SocrataService {
       }
     }
 
+    const clauses = [...params.entries()]
+      .filter(([k]) => k !== '$limit' && k !== '$offset')
+      .map(([k, v]) => `${k}=${v}`);
+
     return {
       rows,
       rowCount: rows.length,
       ...(totalCount != null ? { totalCount } : {}),
       assembledQuery:
-        queryParts.length > 0 ? queryParts.join(' ') : '(default — all columns, up to limit)',
+        clauses.length > 0
+          ? [...clauses, `$limit=${limit}`].join(' ')
+          : '(default — all columns, up to limit)',
     };
   }
 

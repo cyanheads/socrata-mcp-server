@@ -129,8 +129,7 @@ export const queryDataset = tool('socrata_query_dataset', {
   ],
 
   async handler(input, ctx) {
-    const domain =
-      input.domain && input.domain.trim() ? input.domain.trim() : getServerConfig().defaultDomain;
+    const domain = input.domain?.trim() ? input.domain.trim() : getServerConfig().defaultDomain;
 
     if (!DATASET_ID_PATTERN.test(input.dataset_id)) {
       throw ctx.fail(
@@ -147,12 +146,12 @@ export const queryDataset = tool('socrata_query_dataset', {
     });
 
     const svc = getSocrataService();
-    const search = input.search && input.search.trim() ? input.search : undefined;
-    const select = input.select && input.select.trim() ? input.select : undefined;
-    const where = input.where && input.where.trim() ? input.where : undefined;
-    const group = input.group && input.group.trim() ? input.group : undefined;
-    const having = input.having && input.having.trim() ? input.having : undefined;
-    const order = input.order && input.order.trim() ? input.order : undefined;
+    const search = input.search?.trim() ? input.search : undefined;
+    const select = input.select?.trim() ? input.select : undefined;
+    const where = input.where?.trim() ? input.where : undefined;
+    const group = input.group?.trim() ? input.group : undefined;
+    const having = input.having?.trim() ? input.having : undefined;
+    const order = input.order?.trim() ? input.order : undefined;
     let qResult: QueryResult;
     try {
       qResult = await svc.queryDataset(
@@ -187,10 +186,10 @@ export const queryDataset = tool('socrata_query_dataset', {
     if (canvas && qResult.rowCount >= input.limit) {
       try {
         const instance = await canvas.acquire(
-          input.canvas_id && input.canvas_id.trim() ? input.canvas_id : undefined,
+          input.canvas_id?.trim() ? input.canvas_id : undefined,
           ctx,
         );
-        const tableName = `${input.dataset_id.replace('-', '_')}_rows`;
+        const tableName = `${input.dataset_id.replaceAll('-', '_')}_rows`;
         await instance.registerTable(tableName, qResult.rows);
         canvasId = instance.canvasId;
         ctx.log.info('Spilled query result to DataCanvas', {

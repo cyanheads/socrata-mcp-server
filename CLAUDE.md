@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. The framework, skills, and example definitions are in place — the domain isn't. The user's first messages will set direction; wait for them before proceeding.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -59,36 +46,35 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const findDatasets = tool('socrata_find_datasets', {
+  description: 'Search for datasets across all Socrata-powered government open-data portals.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    query: z.string().optional().describe('Full-text search across dataset names and descriptions.'),
+    domain: z.string().optional().describe('Scope search to a single portal (e.g. data.seattle.gov).'),
+    limit: z.number().int().min(1).max(100).default(10).describe('Number of results to return (1–100).'),
+    offset: z.number().int().min(0).default(0).describe('Pagination offset.'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    results: z.array(z.object({
+      dataset_id: z.string().describe('Four-by-four dataset ID.'),
+      name: z.string().describe('Dataset display name.'),
+    })).describe('Matching datasets.'),
+    total_count: z.number().describe('Total matches before pagination.'),
   }),
-  auth: ['inventory:read'],
-
+  errors: [
+    { reason: 'rate_limited', code: JsonRpcErrorCode.ServiceUnavailable, when: 'Discovery API returned 429.', retryable: true, recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher rate limits.' },
+  ],
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const svc = getSocrataService();
+    const { results, totalCount } = await svc.findDatasets({ ...input }, ctx);
+    ctx.log.info('Find datasets completed', { count: results.length, total: totalCount });
+    return { results: results.map(r => ({ dataset_id: r.datasetId, name: r.name })), total_count: totalCount };
   },
-
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: result.results.map(r => `**${r.dataset_id}**: ${r.name}`).join('\n') }],
 });
 ```
 
@@ -96,34 +82,26 @@ export const searchItems = tool('search_items', {
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { getSocrataService } from '@/services/socrata/socrata-service.js';
+import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}', {
+  name: 'socrata-dataset',
+  description: 'Fetch full metadata and column schema for a Socrata dataset by stable URI.',
+  mimeType: 'application/json',
+  params: z.object({
+    domain: z.string().describe('Portal domain (e.g. data.seattle.gov).'),
+    datasetId: z.string().describe('Four-by-four dataset ID (e.g. kzjm-xkqj).'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  async handler(params, ctx) {
+    if (!DATASET_ID_PATTERN.test(params.datasetId)) {
+      throw validationError(`Invalid dataset ID format: "${params.datasetId}".`, { datasetId: params.datasetId });
+    }
+    const svc = getSocrataService();
+    const meta = await svc.getDataset(params.domain, params.datasetId, ctx);
+    return { dataset_id: meta.datasetId, domain: meta.domain, name: meta.name };
+  },
 });
 ```
 
@@ -135,15 +113,15 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  appToken: z.string().optional().describe('Socrata app token for higher rate limits.'),
+  defaultDomain: z.string().default('data.seattle.gov').describe('Default portal domain.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    appToken: 'SOCRATA_APP_TOKEN',
+    defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
   });
   return _config;
 }
@@ -216,20 +194,26 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — registers all tools, resources, prompts
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # SOCRATA_APP_TOKEN, SOCRATA_DEFAULT_DOMAIN (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    socrata/
+      socrata-service.ts                # SODA 2.1 + Discovery API client (init/accessor pattern)
+      types.ts                          # Domain types: DatasetMetadata, QueryResult, PortalEntry, etc.
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      find-datasets.tool.ts             # socrata_find_datasets
+      get-dataset.tool.ts               # socrata_get_dataset
+      query-dataset.tool.ts             # socrata_query_dataset
+      list-portals.tool.ts              # socrata_list_portals
+      dataframe-describe.tool.ts        # socrata_dataframe_describe
+      dataframe-query.tool.ts           # socrata_dataframe_query
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
+      dataset.resource.ts               # socrata://datasets/{domain}/{datasetId}
+      portals.resource.ts               # socrata://portals
     prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      explore-open-data.prompt.ts       # explore_open_data
 ```
 
 ---

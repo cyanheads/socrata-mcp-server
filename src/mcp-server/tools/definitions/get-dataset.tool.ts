@@ -82,8 +82,7 @@ export const getDataset = tool('socrata_get_dataset', {
   ],
 
   async handler(input, ctx) {
-    const domain =
-      input.domain && input.domain.trim() ? input.domain.trim() : getServerConfig().defaultDomain;
+    const domain = input.domain?.trim() ? input.domain.trim() : getServerConfig().defaultDomain;
 
     if (!DATASET_ID_PATTERN.test(input.dataset_id)) {
       throw ctx.fail(

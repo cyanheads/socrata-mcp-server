@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "socrata-mcp-server",
   "version": "0.1.0",
-  "description": "",
-  "author": { "name": "" },
+  "description": "Search and query government open-data portals via the Socrata SODA 2.1 and Discovery APIs. STDIO or Streamable HTTP.",
+  "author": { "name": "cyanheads" },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -13,7 +13,9 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "SOCRATA_APP_TOKEN": "${SOCRATA_APP_TOKEN}",
+        "SOCRATA_DEFAULT_DOMAIN": "${SOCRATA_DEFAULT_DOMAIN}"
       }
     }
   },
@@ -22,5 +24,19 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "SOCRATA_APP_TOKEN": {
+      "title": "Socrata App Token",
+      "description": "App token for higher rate limits. Free to register at any Socrata portal (e.g. data.seattle.gov/profile/app_tokens). Without a token, requests share a throttled pool per IP.",
+      "type": "string",
+      "required": false
+    },
+    "SOCRATA_DEFAULT_DOMAIN": {
+      "title": "Default Portal Domain",
+      "description": "Default Socrata portal domain when domain is omitted from tool calls (e.g. data.seattle.gov, data.cityofnewyork.us).",
+      "type": "string",
+      "required": false,
+      "default": "data.seattle.gov"
+    }
+  }
 }

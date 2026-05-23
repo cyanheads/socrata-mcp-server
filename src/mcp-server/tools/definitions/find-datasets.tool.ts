@@ -114,8 +114,8 @@ export const findDatasets = tool('socrata_find_datasets', {
     });
 
     const svc = getSocrataService();
-    const query = input.query && input.query.trim() ? input.query : undefined;
-    const domain = input.domain && input.domain.trim() ? input.domain : undefined;
+    const query = input.query?.trim() ? input.query : undefined;
+    const domain = input.domain?.trim() ? input.domain : undefined;
     const categories = input.categories?.length ? input.categories : undefined;
     const tags = input.tags?.length ? input.tags : undefined;
     const { results, totalCount } = await svc.findDatasets(

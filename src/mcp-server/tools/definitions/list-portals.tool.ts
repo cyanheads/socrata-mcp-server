@@ -67,8 +67,7 @@ export const listPortals = tool('socrata_list_portals', {
     let portals = await svc.listPortals(ctx);
 
     // Client-side filtering — the domains endpoint has no server-side text filter.
-    const queryFilter =
-      input.query && input.query.trim() ? input.query.trim().toLowerCase() : undefined;
+    const queryFilter = input.query?.trim() ? input.query.trim().toLowerCase() : undefined;
     if (queryFilter) {
       portals = portals.filter(
         (p) =>

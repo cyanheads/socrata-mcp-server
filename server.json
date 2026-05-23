@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "cyanheads/socrata-mcp-server",
-  "description": "MCP server wrapping the Socrata SODA 2.1 API and Discovery API for government open data.",
+  "name": "io.github.cyanheads/socrata-mcp-server",
+  "description": "Search and query government open-data portals via the Socrata SODA 2.1 and Discovery APIs.",
   "repository": {
     "url": "https://github.com/cyanheads/socrata-mcp-server",
     "source": "github"
@@ -12,28 +12,22 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "socrata-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "bun",
       "version": "0.1.0",
       "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
+        { "type": "positional", "value": "run" },
+        { "type": "positional", "value": "start:stdio" }
       ],
       "environmentVariables": [
         {
           "name": "SOCRATA_APP_TOKEN",
-          "description": "Socrata app token for higher rate limits. Free to register at any portal. Without a token, requests share a throttled pool per source IP.",
+          "description": "Socrata app token (X-App-Token header). Without a token, requests share a throttled pool per source IP. Free to register at any Socrata portal.",
           "format": "string",
           "isRequired": false
         },
         {
           "name": "SOCRATA_DEFAULT_DOMAIN",
-          "description": "Default portal domain when domain is omitted from tool calls (e.g. data.seattle.gov).",
+          "description": "Default portal domain when domain is omitted from tool calls (e.g. data.seattle.gov, data.cityofnewyork.us).",
           "format": "string",
           "isRequired": false,
           "default": "data.seattle.gov"
@@ -54,19 +48,26 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "socrata-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "bun",
       "version": "0.1.0",
       "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
+        { "type": "positional", "value": "run" },
+        { "type": "positional", "value": "start:http" }
       ],
       "environmentVariables": [
+        {
+          "name": "SOCRATA_APP_TOKEN",
+          "description": "Socrata app token (X-App-Token header). Without a token, requests share a throttled pool per source IP. Free to register at any Socrata portal.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "SOCRATA_DEFAULT_DOMAIN",
+          "description": "Default portal domain when domain is omitted from tool calls (e.g. data.seattle.gov, data.cityofnewyork.us).",
+          "format": "string",
+          "isRequired": false,
+          "default": "data.seattle.gov"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
