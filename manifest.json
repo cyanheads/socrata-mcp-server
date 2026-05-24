@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "socrata-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "repository": {

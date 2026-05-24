@@ -6,14 +6,20 @@
     "url": "https://github.com/cyanheads/socrata-mcp-server",
     "source": "github"
   },
-  "version": "0.1.2",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://socrata.caseyjhand.com/mcp"
+    }
+  ],
+  "version": "0.1.3",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -49,7 +55,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }
