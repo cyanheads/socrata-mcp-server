@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>socrata-mcp-server</h1>
+  <h1>@cyanheads/socrata-mcp-server</h1>
   <p><b>Search and query government open-data portals via the Socrata SODA 2.1 and Discovery APIs. STDIO or Streamable HTTP.</b>
   <div>6 Tools • 2 Resources • 1 Prompt</div>
   </p>

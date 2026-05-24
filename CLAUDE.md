@@ -1,6 +1,6 @@
 # Developer Protocol
 
-**Server:** socrata-mcp-server
+**Server:** @cyanheads/socrata-mcp-server
 **Version:** 0.1.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.7`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0

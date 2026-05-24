@@ -37,7 +37,7 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
-LABEL org.opencontainers.image.title="socrata-mcp-server"
+LABEL org.opencontainers.image.title="@cyanheads/socrata-mcp-server"
 LABEL org.opencontainers.image.description="Search and query government open-data portals via the Socrata SODA 2.1 and Discovery APIs. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/socrata-mcp-server"
