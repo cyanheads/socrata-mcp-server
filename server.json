@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/socrata-mcp-server",
-  "description": "Search and query government open-data portals via the Socrata SODA 2.1 and Discovery APIs.",
+  "description": "Search and query government open-data portals (Socrata SODA API).",
   "repository": {
     "url": "https://github.com/cyanheads/socrata-mcp-server",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -49,7 +49,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }
