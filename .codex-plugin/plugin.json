@@ -1,0 +1,25 @@
+{
+  "name": "@cyanheads/socrata-mcp-server",
+  "version": "0.1.3",
+  "description": "Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/socrata-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/socrata-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "socrata", "open-data", "soda-api", "government-data", "civic-data"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "@cyanheads/socrata-mcp-server",
+    "shortDescription": "Search and query government open-data portals (Socrata SODA API) via MCP.",
+    "longDescription": "Government open-data server wrapping the Socrata SODA 2.1 API and Discovery API. Supports dataset discovery, schema inspection, SoQL queries, and DataCanvas spillover for large result sets.",
+    "developerName": "cyanheads",
+    "category": "data",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/socrata-mcp-server",
+    "defaultPrompt": []
+  }
+}

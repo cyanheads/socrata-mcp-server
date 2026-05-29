@@ -67,7 +67,7 @@ export const getDataset = tool('socrata_get_dataset', {
   errors: [
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Dataset ID does not match the four-by-four pattern.',
       recovery:
         'Dataset IDs are always 9 characters like kzjm-xkqj. Obtain from socrata_find_datasets.',

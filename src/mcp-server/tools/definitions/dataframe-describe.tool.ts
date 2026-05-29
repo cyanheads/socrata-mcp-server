@@ -56,7 +56,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
   errors: [
     {
       reason: 'canvas_not_found',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       when: 'Provided canvas_id does not match any registered canvas.',
       recovery:
         'Omit canvas_id to list all active tables, or run socrata_query_dataset again to create a new canvas.',

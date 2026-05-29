@@ -50,14 +50,14 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     },
     {
       reason: 'canvas_not_found',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       when: 'canvas_id does not match any registered canvas.',
       recovery:
         'Use socrata_dataframe_describe without canvas_id to list active canvases, or re-run socrata_query_dataset to create a new one.',
     },
     {
       reason: 'sql_rejected',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'SQL was not a SELECT statement or contained disallowed functions.',
       recovery:
         'Only SELECT statements are allowed. Remove DDL, DML, file-reading functions (read_csv, read_parquet), and PRAGMA statements.',

@@ -100,7 +100,7 @@ export const queryDataset = tool('socrata_query_dataset', {
   errors: [
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Dataset ID does not match the four-by-four pattern.',
       recovery:
         'Dataset IDs are always 9 characters like kzjm-xkqj. Obtain from socrata_find_datasets.',
@@ -114,7 +114,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     },
     {
       reason: 'soql_error',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'SoQL syntax error or unknown column name.',
       recovery:
         "Check column names with socrata_get_dataset. Text columns need single-quoted strings (year='2020'); Number columns use bare literals (year=2020).",

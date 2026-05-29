@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-05-28
+
+mcp-ts-core ^0.9.7 → ^0.9.13: HTTP body cap (413), session-init gate, quieter 401/403/400/404 logs, GET /mcp keywords; error-code reclassifications; dep refresh
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-05-23
 
 Add hosted server endpoint — remotes block in server.json, public URL in README

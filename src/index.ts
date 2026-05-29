@@ -21,6 +21,8 @@ await createApp({
   tools: [findDatasets, getDataset, queryDataset, listPortals, dataframeDescribe, dataframeQuery],
   resources: [datasetResource, portalsResource],
   prompts: [exploreOpenData],
+  // Public catalog server — serve full landing inventory regardless of auth mode.
+  landing: { requireAuth: false },
   instructions:
     'Government open-data server wrapping the Socrata SODA 2.1 API and Discovery API.\n' +
     'Workflow: socrata_list_portals → socrata_find_datasets → socrata_get_dataset (inspect schema) → socrata_query_dataset.\n' +
