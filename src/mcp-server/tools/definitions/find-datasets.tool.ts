@@ -79,24 +79,22 @@ export const findDatasets = tool('socrata_find_datasets', {
   }),
   output: z.object({
     results: z.array(DatasetResultSchema).describe('Matching datasets. Empty when no results.'),
-    total_count: z.number().describe('Total matches before pagination. 0 when empty.'),
-    query: z.string().optional().describe('Search query applied, for reference.'),
-    message: z
+  }),
+
+  // Agent-facing context: the query as sent, total match count, and an empty-result notice.
+  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  enrichment: {
+    totalCount: z.number().describe('Total matches before pagination. 0 when empty.'),
+    effectiveQuery: z.string().optional().describe('Search query applied, for reference.'),
+    notice: z
       .string()
       .optional()
       .describe(
         'Recovery hint when results are empty — echoes filters and suggests how to broaden. Absent on non-empty result pages.',
       ),
-  }),
+  },
 
   errors: [
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'Query returned zero results.',
-      recovery:
-        'Broaden search terms, remove category/tag filters, or omit the domain constraint to search all portals.',
-    },
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -132,6 +130,9 @@ export const findDatasets = tool('socrata_find_datasets', {
       ctx,
     );
 
+    ctx.enrich.total(totalCount);
+    if (query) ctx.enrich.echo(query);
+
     if (results.length === 0) {
       const filtersApplied: string[] = [];
       if (input.query) filtersApplied.push(`query="${input.query}"`);
@@ -139,14 +140,11 @@ export const findDatasets = tool('socrata_find_datasets', {
       if (input.categories?.length) filtersApplied.push(`categories=${input.categories.join(',')}`);
       if (input.tags?.length) filtersApplied.push(`tags=${input.tags.join(',')}`);
 
-      return {
-        results: [],
-        total_count: 0,
-        ...(input.query ? { query: input.query } : {}),
-        message:
-          `No datasets matched${filtersApplied.length ? ` with ${filtersApplied.join(', ')}` : ''}. ` +
+      ctx.enrich.notice(
+        `No datasets matched${filtersApplied.length ? ` with ${filtersApplied.join(', ')}` : ''}. ` +
           'Try broader search terms, remove category/tag filters, or omit domain to search all portals.',
-      };
+      );
+      return { results: [] };
     }
 
     return {
@@ -162,26 +160,17 @@ export const findDatasets = tool('socrata_find_datasets', {
         ...(r.dataUpdatedAt ? { data_updated_at: r.dataUpdatedAt } : {}),
         ...(r.viewCount != null ? { view_count: r.viewCount } : {}),
       })),
-      total_count: totalCount,
-      ...(input.query ? { query: input.query } : {}),
     };
   },
 
   format: (result) => {
     const lines: string[] = [];
 
-    // Always render optional top-level fields (needed for format-parity).
-    if (result.query != null) lines.push(`_Query: ${result.query}_`);
-    if (result.message != null) {
-      lines.push(`> ${result.message}`);
-    }
-
     if (result.results.length === 0) {
-      lines.push(`**Total:** ${result.total_count}`);
       return [{ type: 'text', text: lines.join('\n') }];
     }
 
-    lines.push(`\n**${result.total_count} datasets found**\n`);
+    lines.push(`\n**${result.results.length} datasets found**\n`);
 
     for (const ds of result.results) {
       lines.push(`### ${ds.name}`);
@@ -198,12 +187,6 @@ export const findDatasets = tool('socrata_find_datasets', {
       if (ds.view_count != null) lines.push(`**Views:** ${ds.view_count}`);
       if (ds.license != null) lines.push(`**License:** ${ds.license}`);
       lines.push('');
-    }
-
-    if (result.total_count > result.results.length) {
-      lines.push(
-        `_Showing ${result.results.length} of ${result.total_count} total. Use offset parameter to paginate._`,
-      );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

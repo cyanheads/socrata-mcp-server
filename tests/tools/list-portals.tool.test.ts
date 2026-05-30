@@ -3,7 +3,7 @@
  * @module tests/tools/list-portals.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { listPortals } from '@/mcp-server/tools/definitions/list-portals.tool.js';
 
@@ -35,7 +35,8 @@ describe('listPortals', () => {
     const result = await listPortals.handler(input, ctx);
 
     expect(result.portals).toHaveLength(3);
-    expect(result.total_count).toBe(3);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(3);
     expect(result.portals[0]).toMatchObject({
       domain: 'data.seattle.gov',
       organization: 'City of Seattle',
@@ -52,15 +53,16 @@ describe('listPortals', () => {
     expect(result.portals[0].domain).toBe('data.seattle.gov');
   });
 
-  it('returns message when filter matches nothing', async () => {
+  it('returns enrichment notice when filter matches nothing', async () => {
     const ctx = createMockContext({ errors: listPortals.errors });
     const input = listPortals.input.parse({ query: 'xyznotreal' });
     const result = await listPortals.handler(input, ctx);
 
     expect(result.portals).toHaveLength(0);
-    expect(result.total_count).toBe(0);
-    expect(result.message).toBeDefined();
-    expect(result.message).toContain('xyznotreal');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(0);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('xyznotreal');
   });
 
   it('applies pagination via offset and limit', async () => {
@@ -71,7 +73,8 @@ describe('listPortals', () => {
     expect(result.portals).toHaveLength(2);
     // offset=1 skips first portal (seattle), returns NY and SF
     expect(result.portals[0].domain).toBe('data.cityofnewyork.us');
-    expect(result.total_count).toBe(3);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(3);
   });
 
   it('handles portals with no organization (sparse payload)', async () => {
@@ -92,7 +95,6 @@ describe('listPortals', () => {
         { domain: 'data.seattle.gov', organization: 'City of Seattle', dataset_count: 500 },
         { domain: 'data.sfgov.org', dataset_count: 400 },
       ],
-      total_count: 2,
     };
     const blocks = listPortals.format!(output);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
@@ -102,14 +104,9 @@ describe('listPortals', () => {
     expect(text).toContain('data.sfgov.org');
   });
 
-  it('formats empty result with message', () => {
-    const output = {
-      portals: [],
-      total_count: 0,
-      message: 'No portals matched "xyznotreal".',
-    };
+  it('formats empty result as empty text', () => {
+    const output = { portals: [] };
     const blocks = listPortals.format!(output);
-    const text = (blocks[0] as { text?: string }).text ?? '';
-    expect(text).toContain('No portals matched');
+    expect(blocks.some((b) => b.type === 'text')).toBe(true);
   });
 });

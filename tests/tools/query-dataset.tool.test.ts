@@ -3,7 +3,7 @@
  * @module tests/tools/query-dataset.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryDataset } from '@/mcp-server/tools/definitions/query-dataset.tool.js';
 
@@ -124,6 +124,23 @@ describe('queryDataset', () => {
     const blocks = queryDataset.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
     expect(text).toContain('No rows returned');
+  });
+
+  it('populates enrichment notice when query returns empty rows', async () => {
+    const ctx = createMockContext({ errors: queryDataset.errors });
+    mockQueryDataset.mockResolvedValue({
+      rows: [],
+      rowCount: 0,
+      assembledQuery: '$where=year=9999 $limit=100',
+    });
+
+    const input = queryDataset.input.parse({ dataset_id: 'kzjm-xkqj', where: 'year=9999' });
+    const result = await queryDataset.handler(input, ctx);
+
+    expect(result.rows).toHaveLength(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('No rows returned');
   });
 
   it('format shows canvas_id when spilled to canvas', () => {

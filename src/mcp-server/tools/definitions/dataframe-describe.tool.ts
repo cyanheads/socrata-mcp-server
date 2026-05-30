@@ -45,13 +45,18 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       .array(TableInfoSchema)
       .describe('Tables available for SQL queries. Empty when none registered.'),
     canvas_id: z.string().optional().describe('Canvas ID resolved, when canvas is enabled.'),
-    message: z
+  }),
+
+  // Agent-facing context: status notice when canvas is disabled or no tables exist.
+  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  enrichment: {
+    notice: z
       .string()
       .optional()
       .describe(
         'Status message when canvas is not enabled or no tables are registered. Absent when tables are present.',
       ),
-  }),
+  },
 
   errors: [
     {
@@ -67,11 +72,10 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     const canvas = (ctx as unknown as { core?: { canvas?: DataCanvas } }).core?.canvas;
 
     if (!canvas) {
-      return {
-        tables: [],
-        message:
-          'DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb to enable canvas spillover.',
-      };
+      ctx.enrich.notice(
+        'DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb to enable canvas spillover.',
+      );
+      return { tables: [] };
     }
 
     const canvasIdInput = input.canvas_id?.trim() ? input.canvas_id.trim() : undefined;
@@ -79,10 +83,12 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     const tableInfos = await instance.describe();
 
     if (tableInfos.length === 0) {
+      ctx.enrich.notice(
+        'No tables registered on this canvas yet. Run socrata_query_dataset to populate.',
+      );
       return {
         tables: [],
         canvas_id: instance.canvasId,
-        message: 'No tables registered on this canvas yet. Run socrata_query_dataset to populate.',
       };
     }
 
@@ -101,7 +107,6 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
 
     // Always render optional fields for format-parity.
     if (result.canvas_id != null) lines.push(`**Canvas ID:** ${result.canvas_id}`);
-    if (result.message != null) lines.push(`> ${result.message}`);
 
     if (result.tables.length === 0) {
       return [{ type: 'text', text: lines.join('\n') }];

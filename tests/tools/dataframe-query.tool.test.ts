@@ -3,8 +3,8 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it, vi } from 'vitest';
 import { dataframeQuery } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 
 describe('dataframeQuery', () => {
@@ -16,6 +16,29 @@ describe('dataframeQuery', () => {
       sql: 'SELECT * FROM kzjm_xkqj_rows LIMIT 10',
     });
     await expect(dataframeQuery.handler(input, ctx)).rejects.toThrow('DataCanvas is not enabled');
+  });
+
+  it('populates enrichment notice when query returns empty rows', async () => {
+    const mockInstance = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    };
+    const mockCanvas = {
+      acquire: vi.fn().mockResolvedValue(mockInstance),
+    };
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    // Attach canvas via the same cast the handler uses
+    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'abc1234567',
+      sql: 'SELECT * FROM kzjm_xkqj_rows WHERE year = 9999',
+    });
+    const result = await dataframeQuery.handler(input, ctx);
+
+    expect(result.row_count).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('zero rows');
   });
 
   it('formats rows as markdown table when columns fit', () => {

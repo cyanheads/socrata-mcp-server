@@ -43,12 +43,17 @@ export const listPortals = tool('socrata_list_portals', {
   }),
   output: z.object({
     portals: z.array(PortalEntrySchema).describe('Matching portals. Empty when no results.'),
-    total_count: z.number().describe('Total portals before pagination. 0 when empty.'),
-    message: z
+  }),
+
+  // Agent-facing context: total portal count and an empty-result notice.
+  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  enrichment: {
+    totalCount: z.number().describe('Total portals before pagination. 0 when empty.'),
+    notice: z
       .string()
       .optional()
       .describe('Recovery hint when no portals matched the filter. Absent on non-empty pages.'),
-  }),
+  },
 
   errors: [
     {
@@ -79,14 +84,15 @@ export const listPortals = tool('socrata_list_portals', {
     const totalCount = portals.length;
     const page = portals.slice(input.offset, input.offset + input.limit);
 
+    ctx.enrich.total(totalCount);
+
     if (page.length === 0) {
-      return {
-        portals: [],
-        total_count: 0,
-        message: queryFilter
+      ctx.enrich.notice(
+        queryFilter
           ? `No portals matched "${input.query}". Try a broader term or omit the query to list all portals.`
           : 'No portals available.',
-      };
+      );
+      return { portals: [] };
     }
 
     return {
@@ -95,33 +101,21 @@ export const listPortals = tool('socrata_list_portals', {
         ...(p.organization ? { organization: p.organization } : {}),
         dataset_count: p.datasetCount,
       })),
-      total_count: totalCount,
     };
   },
 
   format: (result) => {
     const lines: string[] = [];
 
-    // Always render optional fields for format-parity.
-    if (result.message != null) lines.push(`> ${result.message}`);
-
     if (result.portals.length === 0) {
-      lines.push(`**Total:** ${result.total_count}`);
       return [{ type: 'text', text: lines.join('\n') }];
     }
 
-    lines.push(`\n**${result.total_count} portals**\n`);
     lines.push('| Domain | Organization | Datasets |');
     lines.push('|:-------|:-------------|:---------|');
     for (const p of result.portals) {
       lines.push(
         `| ${p.domain} | ${p.organization ?? '—'} | ${p.dataset_count.toLocaleString()} |`,
-      );
-    }
-
-    if (result.total_count > result.portals.length) {
-      lines.push(
-        `\n_Showing ${result.portals.length} of ${result.total_count}. Use offset to paginate._`,
       );
     }
 

@@ -3,7 +3,7 @@
  * @module tests/tools/find-datasets.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { findDatasets } from '@/mcp-server/tools/definitions/find-datasets.tool.js';
 
@@ -46,10 +46,12 @@ describe('findDatasets', () => {
       domain: 'data.seattle.gov',
       name: 'Seattle 911 Incidents',
     });
-    expect(result.total_count).toBe(1);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(1);
+    expect(enrichment.effectiveQuery).toBe('911');
   });
 
-  it('returns empty results with message when no datasets found', async () => {
+  it('returns empty results with enrichment notice when no datasets found', async () => {
     const ctx = createMockContext({ errors: findDatasets.errors });
     mockFindDatasets.mockResolvedValue({ results: [], totalCount: 0 });
 
@@ -57,9 +59,10 @@ describe('findDatasets', () => {
     const result = await findDatasets.handler(input, ctx);
 
     expect(result.results).toHaveLength(0);
-    expect(result.total_count).toBe(0);
-    expect(result.message).toBeDefined();
-    expect(result.message).toContain('No datasets matched');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalCount).toBe(0);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('No datasets matched');
   });
 
   it('applies domain scoping when provided', async () => {
@@ -73,7 +76,7 @@ describe('findDatasets', () => {
     expect(call.domain).toBe('data.seattle.gov');
   });
 
-  it('echoes query in output when provided', async () => {
+  it('echoes query in enrichment when provided', async () => {
     const ctx = createMockContext({ errors: findDatasets.errors });
     mockFindDatasets.mockResolvedValue({
       results: [
@@ -89,9 +92,10 @@ describe('findDatasets', () => {
     });
 
     const input = findDatasets.input.parse({ query: 'trees' });
-    const result = await findDatasets.handler(input, ctx);
+    await findDatasets.handler(input, ctx);
 
-    expect(result.query).toBe('trees');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.effectiveQuery).toBe('trees');
   });
 
   it('handles sparse upstream result (no optional fields)', async () => {
@@ -133,7 +137,6 @@ describe('findDatasets', () => {
           column_names: ['incident_type', 'date'],
         },
       ],
-      total_count: 1,
     };
     const blocks = findDatasets.format!(output);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
@@ -143,11 +146,9 @@ describe('findDatasets', () => {
     expect(text).toContain('data.seattle.gov');
   });
 
-  it('formats empty results with total count', () => {
-    const output = { results: [], total_count: 0, message: 'No datasets matched.' };
+  it('formats empty results as empty text', () => {
+    const output = { results: [] };
     const blocks = findDatasets.format!(output);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
-    const text = (blocks[0] as { text?: string }).text ?? '';
-    expect(text).toContain('No datasets matched.');
   });
 });

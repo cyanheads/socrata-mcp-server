@@ -97,6 +97,17 @@ export const queryDataset = tool('socrata_query_dataset', {
       ),
   }),
 
+  // Agent-facing context: empty-result notice when zero rows are returned.
+  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when the query returned zero rows — suggests narrowing or reviewing the SoQL. Absent on non-empty result sets.',
+      ),
+  },
+
   errors: [
     {
       reason: 'invalid_id',
@@ -178,6 +189,13 @@ export const queryDataset = tool('socrata_query_dataset', {
         throw ctx.fail('not_found', err.message, { ...ctx.recoveryFor('not_found') });
       }
       throw err;
+    }
+
+    if (qResult.rowCount === 0) {
+      ctx.enrich.notice(
+        `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${where}` : ''}. ` +
+          'Check column names and quoting with socrata_get_dataset, or broaden the filter.',
+      );
     }
 
     // Attempt DataCanvas spillover when canvas is available and result hit the limit.

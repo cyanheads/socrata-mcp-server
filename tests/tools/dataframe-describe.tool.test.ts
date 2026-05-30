@@ -3,20 +3,21 @@
  * @module tests/tools/dataframe-describe.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { dataframeDescribe } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 
 describe('dataframeDescribe', () => {
-  it('returns empty tables with message when canvas is not enabled', async () => {
+  it('returns empty tables with enrichment notice when canvas is not enabled', async () => {
     const ctx = createMockContext({ errors: dataframeDescribe.errors });
     // ctx has no canvas attached — simulates CANVAS_PROVIDER_TYPE unset
     const input = dataframeDescribe.input.parse({});
     const result = await dataframeDescribe.handler(input, ctx);
 
     expect(result.tables).toHaveLength(0);
-    expect(result.message).toBeDefined();
-    expect(result.message).toContain('DataCanvas is not enabled');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeDefined();
+    expect(enrichment.notice).toContain('DataCanvas is not enabled');
   });
 
   it('formats output with canvas_id when present', () => {
@@ -42,25 +43,19 @@ describe('dataframeDescribe', () => {
     expect(text).toContain('incident_type');
   });
 
-  it('formats empty canvas state with message', () => {
+  it('formats empty canvas state showing canvas_id', () => {
     const output = {
       tables: [],
       canvas_id: 'abc1234567',
-      message: 'No tables registered on this canvas yet.',
     };
     const blocks = dataframeDescribe.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
     expect(text).toContain('abc1234567');
-    expect(text).toContain('No tables registered');
   });
 
   it('formats disabled-canvas state (no canvas_id, no tables)', () => {
-    const output = {
-      tables: [],
-      message: 'DataCanvas is not enabled.',
-    };
+    const output = { tables: [] };
     const blocks = dataframeDescribe.format!(output);
-    const text = (blocks[0] as { text?: string }).text ?? '';
-    expect(text).toContain('DataCanvas is not enabled.');
+    expect(blocks.some((b) => b.type === 'text')).toBe(true);
   });
 });

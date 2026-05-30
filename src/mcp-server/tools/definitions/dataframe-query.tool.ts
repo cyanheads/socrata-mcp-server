@@ -41,6 +41,15 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     canvas_id: z.string().describe('Canvas ID queried.'),
   }),
 
+  // Agent-facing context: empty-result notice when SQL returns zero rows.
+  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when the SQL returned zero rows. Absent when rows are present.'),
+  },
+
   errors: [
     {
       reason: 'canvas_disabled',
@@ -85,6 +94,12 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       rowLimit: input.limit,
       signal: ctx.signal,
     });
+
+    if (result.rows.length === 0) {
+      ctx.enrich.notice(
+        'Query returned zero rows. Check table names with socrata_dataframe_describe or adjust the SQL filter.',
+      );
+    }
 
     return {
       rows: result.rows,
