@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-05-29 05:47:29
+Generated on: 2026-06-02 15:06:00
 
 ```text
 socrata-mcp-server/
@@ -29,12 +29,14 @@ socrata-mcp-server/
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -61,6 +63,8 @@ socrata-mcp-server/
 │   ├── api-errors/
 │   │   └── SKILL.md
 │   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-mirror/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -89,6 +93,13 @@ socrata-mcp-server/
 │   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
+│   │   └── SKILL.md
+│   ├── orchestrations/
+│   │   ├── workflows/
+│   │   │   ├── field-test-fix.md
+│   │   │   ├── fix-wrapup-release.md
+│   │   │   ├── greenfield-build.md
+│   │   │   └── maintenance-release.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -137,9 +148,12 @@ socrata-mcp-server/
 │   ├── mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
+│   │   │       ├── dataset.resource.test.ts
+│   │   │       └── portals.resource.test.ts
 │   │   └── tools/
 │   │       └── definitions/
 │   ├── prompts/
+│   │   └── explore-open-data.prompt.test.ts
 │   ├── resources/
 │   └── tools/
 │       ├── dataframe-describe.tool.test.ts
@@ -147,7 +161,8 @@ socrata-mcp-server/
 │       ├── find-datasets.tool.test.ts
 │       ├── get-dataset.tool.test.ts
 │       ├── list-portals.tool.test.ts
-│       └── query-dataset.tool.test.ts
+│       ├── query-dataset.tool.test.ts
+│       └── security.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
