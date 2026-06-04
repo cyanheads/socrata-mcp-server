@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-06-04
+
+socrata_dataframe_describe and socrata_dataframe_query: canvas_not_found error contract now fires when canvas.acquire throws NotFound on an unknown canvas_id
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-02
 
 mcp-ts-core ^0.9.21: per-request log context fix, secret stripping from error messages, withRetry fail-fast on non-retryable errors; README client-config key renamed; skills sync
