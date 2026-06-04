@@ -3,6 +3,7 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { dataframeQuery } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
@@ -70,6 +71,44 @@ describe('dataframeQuery', () => {
     const text = (blocks[0] as { text?: string }).text ?? '';
     expect(text).toContain('No rows returned');
     expect(text).toContain('abc1234567');
+  });
+
+  it('throws canvas_not_found when canvas.acquire rejects with NotFound', async () => {
+    const mockCanvas = {
+      acquire: vi
+        .fn()
+        .mockRejectedValue(
+          new McpError(
+            JsonRpcErrorCode.NotFound,
+            'Canvas not found or expired. Omit canvas_id to start a new canvas.',
+            { canvasId: 'xxxx-invalid' },
+          ),
+        ),
+    };
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'xxxx-invalid',
+      sql: 'SELECT * FROM some_table LIMIT 10',
+    });
+    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'canvas_not_found' },
+    });
+  });
+
+  it('re-throws non-NotFound errors from canvas.acquire unchanged', async () => {
+    const mockCanvas = {
+      acquire: vi.fn().mockRejectedValue(new Error('Unexpected internal failure')),
+    };
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'abc1234567',
+      sql: 'SELECT * FROM some_table LIMIT 10',
+    });
+    await expect(dataframeQuery.handler(input, ctx)).rejects.toThrow('Unexpected internal failure');
   });
 
   it('formats wide result set as JSON blocks', () => {

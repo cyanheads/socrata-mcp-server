@@ -6,7 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 
 const ColumnInfoSchema = z
   .object({
@@ -79,7 +79,21 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     }
 
     const canvasIdInput = input.canvas_id?.trim() ? input.canvas_id.trim() : undefined;
-    const instance = await canvas.acquire(canvasIdInput, ctx);
+    let instance: Awaited<ReturnType<DataCanvas['acquire']>>;
+    try {
+      instance = await canvas.acquire(canvasIdInput, ctx);
+    } catch (err) {
+      if (
+        canvasIdInput !== undefined &&
+        err instanceof McpError &&
+        err.code === JsonRpcErrorCode.NotFound
+      ) {
+        throw ctx.fail('canvas_not_found', err.message, {
+          ...ctx.recoveryFor('canvas_not_found'),
+        });
+      }
+      throw err;
+    }
     const tableInfos = await instance.describe();
 
     if (tableInfos.length === 0) {

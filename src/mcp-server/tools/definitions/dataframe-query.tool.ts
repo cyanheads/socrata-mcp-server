@@ -6,7 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 
 export const dataframeQuery = tool('socrata_dataframe_query', {
   title: 'Query DataCanvas Table',
@@ -89,7 +89,17 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       sql: input.sql.slice(0, 200),
     });
 
-    const instance = await canvas.acquire(input.canvas_id, ctx);
+    let instance: Awaited<ReturnType<DataCanvas['acquire']>>;
+    try {
+      instance = await canvas.acquire(input.canvas_id, ctx);
+    } catch (err) {
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        throw ctx.fail('canvas_not_found', err.message, {
+          ...ctx.recoveryFor('canvas_not_found'),
+        });
+      }
+      throw err;
+    }
     const result = await instance.query(input.sql, {
       rowLimit: input.limit,
       signal: ctx.signal,

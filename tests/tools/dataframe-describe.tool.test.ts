@@ -3,8 +3,9 @@
  * @module tests/tools/dataframe-describe.tool.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { dataframeDescribe } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 
 describe('dataframeDescribe', () => {
@@ -57,5 +58,47 @@ describe('dataframeDescribe', () => {
     const output = { tables: [] };
     const blocks = dataframeDescribe.format!(output);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
+  });
+
+  it('throws canvas_not_found when canvas.acquire rejects with NotFound and canvas_id was provided', async () => {
+    const mockCanvas = {
+      acquire: vi
+        .fn()
+        .mockRejectedValue(
+          new McpError(
+            JsonRpcErrorCode.NotFound,
+            'Canvas not found or expired. Omit canvas_id to start a new canvas.',
+            { canvasId: 'xxxx-invalid' },
+          ),
+        ),
+    };
+    const ctx = createMockContext({ errors: dataframeDescribe.errors });
+    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+
+    const input = dataframeDescribe.input.parse({ canvas_id: 'xxxx-invalid' });
+    await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'canvas_not_found' },
+    });
+  });
+
+  it('does not re-route to canvas_not_found when canvas_id is omitted and acquire rejects', async () => {
+    // When canvas_id is omitted, acquire creates a new canvas — NotFound should not occur
+    // in practice, but if it does for another reason, we should not swallow it as canvas_not_found.
+    const unexpectedError = new McpError(
+      JsonRpcErrorCode.NotFound,
+      'Canvas registry is shutting down.',
+      { tenantId: 'default' },
+    );
+    const mockCanvas = {
+      acquire: vi.fn().mockRejectedValue(unexpectedError),
+    };
+    const ctx = createMockContext({ errors: dataframeDescribe.errors });
+    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+
+    const input = dataframeDescribe.input.parse({});
+    // Should re-throw the raw error, not convert to canvas_not_found
+    await expect(dataframeDescribe.handler(input, ctx)).rejects.toThrow(
+      'Canvas registry is shutting down.',
+    );
   });
 });
