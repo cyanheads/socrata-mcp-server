@@ -97,8 +97,8 @@ export const queryDataset = tool('socrata_query_dataset', {
       ),
   }),
 
-  // Agent-facing context: empty-result notice when zero rows are returned.
-  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  // Agent-facing context: empty-result notice, plus truncation disclosure when the
+  // row cap was hit. Reaches structuredContent and content[] automatically — no format() entry needed.
   enrichment: {
     notice: z
       .string()
@@ -106,6 +106,14 @@ export const queryDataset = tool('socrata_query_dataset', {
       .describe(
         'Guidance when the query returned zero rows — suggests narrowing or reviewing the SoQL. Absent on non-empty result sets.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when rows filled the limit — more rows match (see total_count). Spills to canvas when enabled.',
+      ),
+    shown: z.number().optional().describe('Rows returned in this response when capped.'),
+    cap: z.number().optional().describe('The row limit that was applied when capped.'),
   },
 
   errors: [
@@ -196,6 +204,13 @@ export const queryDataset = tool('socrata_query_dataset', {
         `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${where}` : ''}. ` +
           'Check column names and quoting with socrata_get_dataset, or broaden the filter.',
       );
+    } else if (qResult.rowCount >= input.limit) {
+      ctx.enrich.truncated({
+        shown: qResult.rowCount,
+        cap: input.limit,
+        guidance:
+          'Rows filled the limit — more rows match (exact count in total_count). Page with offset, raise limit (max 5000), or query the spilled canvas via socrata_dataframe_query when CANVAS_PROVIDER_TYPE=duckdb.',
+      });
     }
 
     // Attempt DataCanvas spillover when canvas is available and result hit the limit.

@@ -41,13 +41,19 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     canvas_id: z.string().describe('Canvas ID queried.'),
   }),
 
-  // Agent-facing context: empty-result notice when SQL returns zero rows.
-  // Reaches structuredContent and content[] automatically — no format() entry needed.
+  // Agent-facing context: empty-result notice, plus truncation disclosure when the
+  // row cap was hit. Reaches structuredContent and content[] automatically — no format() entry needed.
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe('Guidance when the SQL returned zero rows. Absent when rows are present.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when results were capped at the limit — more rows match the query.'),
+    shown: z.number().optional().describe('Rows returned in this response when capped.'),
+    cap: z.number().optional().describe('The row limit that was applied when capped.'),
   },
 
   errors: [
@@ -67,9 +73,9 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     {
       reason: 'sql_rejected',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SQL was not a SELECT statement or contained disallowed functions.',
+      when: 'SQL was not a SELECT statement, referenced a system catalog, or contained disallowed functions.',
       recovery:
-        'Only SELECT statements are allowed. Remove DDL, DML, file-reading functions (read_csv, read_parquet), and PRAGMA statements.',
+        'Only SELECT statements against registered tables are allowed. Remove DDL, DML, file-reading functions (read_csv, read_parquet), PRAGMA statements, and system catalog references (information_schema, pg_catalog, sqlite_master, duckdb_*). Use socrata_dataframe_describe to list tables and schemas.',
     },
   ],
 
@@ -102,6 +108,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     }
     const result = await instance.query(input.sql, {
       rowLimit: input.limit,
+      denySystemCatalogs: true,
       signal: ctx.signal,
     });
 
@@ -109,6 +116,13 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       ctx.enrich.notice(
         'Query returned zero rows. Check table names with socrata_dataframe_describe or adjust the SQL filter.',
       );
+    } else if (result.truncated) {
+      ctx.enrich.truncated({
+        shown: result.rows.length,
+        cap: input.limit,
+        guidance:
+          'Results were capped at the limit — more rows match. Raise limit (max 10000), or refine the SQL with WHERE/aggregates to narrow the result set.',
+      });
     }
 
     return {
