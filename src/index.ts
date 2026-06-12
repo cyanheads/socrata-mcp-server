@@ -18,6 +18,8 @@ import { queryDataset } from './mcp-server/tools/definitions/query-dataset.tool.
 import { initSocrataService } from './services/socrata/socrata-service.js';
 
 await createApp({
+  name: 'socrata-mcp-server',
+  title: 'socrata-mcp-server',
   tools: [findDatasets, getDataset, queryDataset, listPortals, dataframeDescribe, dataframeQuery],
   resources: [datasetResource, portalsResource],
   prompts: [exploreOpenData],
