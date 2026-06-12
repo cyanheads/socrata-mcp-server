@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-06-12
+
+Truncation disclosure on socrata_query_dataset and socrata_dataframe_query, SQL system-catalog denial, explicit server identity; @cyanheads/mcp-ts-core ^0.9.21 → ^0.10.6
+
 ## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-06-04
 
 socrata_dataframe_describe and socrata_dataframe_query: canvas_not_found error contract now fires when canvas.acquire throws NotFound on an unknown canvas_id
