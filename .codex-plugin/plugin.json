@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/socrata-mcp-server",
+  "name": "socrata-mcp-server",
   "version": "0.1.8",
   "description": "Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP.",
   "author": {
