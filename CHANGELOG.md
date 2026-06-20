@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-06-20
+
+mcp-ts-core ^0.10.6 → ^0.10.9 maintenance: devcheck dependency-specifier guard + plugin-manifest packaging checks, fresh-scaffold devcheck guards, re-synced scripts and skills
+
 ## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-06-12
 
 Truncation disclosure on socrata_query_dataset and socrata_dataframe_query, SQL system-catalog denial, explicit server identity; @cyanheads/mcp-ts-core ^0.9.21 → ^0.10.6
