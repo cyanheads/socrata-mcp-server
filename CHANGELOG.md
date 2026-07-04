@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-07-04 · 🛡️ Security
+
+Five bug fixes (SoQL error classification, invalid app-token detection, grouped total_count, DataCanvas reachability, computed-region spillover); mcp-ts-core ^0.10.9 → ^0.10.10; vite/hono/js-yaml security advisories cleared
+
 ## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-06-20
 
 mcp-ts-core ^0.10.6 → ^0.10.9 maintenance: devcheck dependency-specifier guard + plugin-manifest packaging checks, fresh-scaffold devcheck guards, re-synced scripts and skills
