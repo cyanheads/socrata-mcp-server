@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { getCanvas } from '@/services/canvas-accessor.js';
 
 export const dataframeQuery = tool('socrata_dataframe_query', {
   title: 'Query DataCanvas Table',
@@ -68,7 +69,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'canvas_id does not match any registered canvas.',
       recovery:
-        'Use socrata_dataframe_describe without canvas_id to list active canvases, or re-run socrata_query_dataset to create a new one.',
+        'Canvas tokens expire after inactivity and cannot be listed. Re-run socrata_query_dataset to stage a fresh canvas and pass the canvas_id it returns.',
     },
     {
       reason: 'sql_rejected',
@@ -80,7 +81,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
   ],
 
   async handler(input, ctx) {
-    const canvas = (ctx as unknown as { core?: { canvas?: DataCanvas } }).core?.canvas;
+    const canvas = getCanvas();
 
     if (!canvas) {
       throw ctx.fail(

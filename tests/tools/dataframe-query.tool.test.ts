@@ -3,15 +3,21 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeQuery } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
+import { setCanvas } from '@/services/canvas-accessor.js';
+
+afterEach(() => {
+  setCanvas(undefined);
+});
 
 describe('dataframeQuery', () => {
   it('throws when canvas is not enabled', async () => {
     const ctx = createMockContext({ errors: dataframeQuery.errors });
-    // ctx has no canvas attached — simulates CANVAS_PROVIDER_TYPE unset
+    // No setCanvas call — simulates CANVAS_PROVIDER_TYPE unset
     const input = dataframeQuery.input.parse({
       canvas_id: 'abc1234567',
       sql: 'SELECT * FROM kzjm_xkqj_rows LIMIT 10',
@@ -27,8 +33,7 @@ describe('dataframeQuery', () => {
       acquire: vi.fn().mockResolvedValue(mockInstance),
     };
     const ctx = createMockContext({ errors: dataframeQuery.errors });
-    // Attach canvas via the same cast the handler uses
-    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+    setCanvas(mockCanvas as unknown as DataCanvas);
 
     const input = dataframeQuery.input.parse({
       canvas_id: 'abc1234567',
@@ -86,7 +91,7 @@ describe('dataframeQuery', () => {
         ),
     };
     const ctx = createMockContext({ errors: dataframeQuery.errors });
-    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+    setCanvas(mockCanvas as unknown as DataCanvas);
 
     const input = dataframeQuery.input.parse({
       canvas_id: 'xxxx-invalid',
@@ -102,7 +107,7 @@ describe('dataframeQuery', () => {
       acquire: vi.fn().mockRejectedValue(new Error('Unexpected internal failure')),
     };
     const ctx = createMockContext({ errors: dataframeQuery.errors });
-    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+    setCanvas(mockCanvas as unknown as DataCanvas);
 
     const input = dataframeQuery.input.parse({
       canvas_id: 'abc1234567',

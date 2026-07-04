@@ -15,6 +15,7 @@ import { findDatasets } from './mcp-server/tools/definitions/find-datasets.tool.
 import { getDataset } from './mcp-server/tools/definitions/get-dataset.tool.js';
 import { listPortals } from './mcp-server/tools/definitions/list-portals.tool.js';
 import { queryDataset } from './mcp-server/tools/definitions/query-dataset.tool.js';
+import { setCanvas } from './services/canvas-accessor.js';
 import { initSocrataService } from './services/socrata/socrata-service.js';
 
 await createApp({
@@ -32,7 +33,10 @@ await createApp({
     '  Number columns: bare literals (year=2023)\n' +
     "  Text columns: single-quoted strings (year='2023')\n" +
     'Set SOCRATA_APP_TOKEN for higher rate limits. Set CANVAS_PROVIDER_TYPE=duckdb for SQL analytics on large result sets.',
-  setup() {
+  setup(core) {
     initSocrataService();
+    // Canvas lives on CoreServices, not on the per-request Context — expose it
+    // to handlers through the module-level accessor.
+    setCanvas(core.canvas);
   },
 });

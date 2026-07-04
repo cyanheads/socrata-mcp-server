@@ -183,8 +183,8 @@ Key column fields from the `api/views/{id}.json` response: `fieldName`, `dataTyp
 
 **Output:** `{ rows: [object], rowCount, totalCount?, assembledQuery, domain, dataset_id, canvas_id? }`.
 
-- `totalCount` is included when the result set is truncated (`rowCount < totalCount`) so the agent knows to paginate or narrow the query.
-- `canvasId` is included when results spilled to a DataCanvas table (requires `CANVAS_PROVIDER_TYPE=duckdb`). Use with `socrata_dataframe_query` to run SQL against the full result set.
+- `totalCount` is included when a plain row query is truncated (`rowCount < totalCount`) so the agent knows to paginate or narrow the query. Omitted for grouped/aggregate queries (`group` set) — the count strategy counts source rows, which would not describe the returned groups.
+- `canvasId` is included when results spilled to a DataCanvas table (requires `CANVAS_PROVIDER_TYPE=duckdb`). Use with `socrata_dataframe_query` to run SQL against the full result set. Socrata system columns (`:@computed_region_*`) are excluded from the spilled table — they are not valid canvas identifiers; the inline `rows` keep them.
 
 **SODA 2.1 quirks surfaced in output:**
 - All row values are strings in SODA 2.1 — even numeric columns. The column schema (`socrata_get_dataset`) is the source of truth for types; numeric parsing happens only when the caller needs it.
@@ -233,11 +233,11 @@ Only meaningful when `CANVAS_PROVIDER_TYPE=duckdb`. Follow the DataCanvas patter
 
 **`socrata_dataframe_query` output:** `{ rows: [object], rowCount, sql }`. Note: DuckDB infers types from the spilled data — numeric columns that SODA returned as strings are queryable with numeric comparisons after spillover.
 
-**`socrata_dataframe_describe` inputs:** `canvas_id` (string, optional — omit to list all tables in the session).
+**`socrata_dataframe_describe` inputs:** `canvas_id` (string, optional in the schema, but required in practice when canvas is enabled — canvases cannot be enumerated, so omitting it fails with `canvas_id_required` instead of listing tables).
 
 **`socrata_dataframe_describe` output:** `{ tables: [{ tableId, rowCount, columns: [{ name, type }], registeredAt }] }`.
 
-**Errors** (both tools): `canvas_not_found` / `InvalidParams` when the canvas_id doesn't match any registered table — use `socrata_dataframe_describe` to list active tables.
+**Errors** (both tools): `canvas_not_found` / `NotFound` when the canvas_id doesn't match any active canvas — canvas tokens cannot be listed, so re-run `socrata_query_dataset` to stage a fresh canvas. `socrata_dataframe_describe` additionally throws `canvas_id_required` / `ValidationError` when canvas is enabled and `canvas_id` is omitted.
 
 ---
 

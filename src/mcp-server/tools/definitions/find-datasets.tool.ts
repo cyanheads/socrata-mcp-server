@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const DatasetResultSchema = z
@@ -102,6 +102,13 @@ export const findDatasets = tool('socrata_find_datasets', {
       retryable: true,
       recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
     },
+    {
+      reason: 'invalid_app_token',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'Socrata rejected the configured SOCRATA_APP_TOKEN.',
+      recovery:
+        'Unset SOCRATA_APP_TOKEN or replace it with a valid Socrata app token, then restart the server.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -116,19 +123,36 @@ export const findDatasets = tool('socrata_find_datasets', {
     const domain = input.domain?.trim() ? input.domain : undefined;
     const categories = input.categories?.length ? input.categories : undefined;
     const tags = input.tags?.length ? input.tags : undefined;
-    const { results, totalCount } = await svc.findDatasets(
-      {
-        ...(query ? { query } : {}),
-        ...(domain ? { domain } : {}),
-        ...(categories ? { categories } : {}),
-        ...(tags ? { tags } : {}),
-        ...(input.only ? { only: input.only } : {}),
-        ...(input.order ? { order: input.order } : {}),
-        limit: input.limit,
-        offset: input.offset,
-      },
-      ctx,
-    );
+    let found: Awaited<ReturnType<typeof svc.findDatasets>>;
+    try {
+      found = await svc.findDatasets(
+        {
+          ...(query ? { query } : {}),
+          ...(domain ? { domain } : {}),
+          ...(categories ? { categories } : {}),
+          ...(tags ? { tags } : {}),
+          ...(input.only ? { only: input.only } : {}),
+          ...(input.order ? { order: input.order } : {}),
+          limit: input.limit,
+          offset: input.offset,
+        },
+        ctx,
+      );
+    } catch (err) {
+      // Re-throw service failures that map to declared contract reasons via
+      // ctx.fail so the contract recovery hint reaches the wire.
+      if (err instanceof McpError) {
+        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
+        if (reason === 'rate_limited' || reason === 'invalid_app_token') {
+          throw ctx.fail(reason, err.message, {
+            ...(err.data as Record<string, unknown>),
+            ...ctx.recoveryFor(reason),
+          });
+        }
+      }
+      throw err;
+    }
+    const { results, totalCount } = found;
 
     ctx.enrich.total(totalCount);
     if (query) ctx.enrich.echo(query);

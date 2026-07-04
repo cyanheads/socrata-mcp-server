@@ -3,15 +3,21 @@
  * @module tests/tools/dataframe-describe.tool.test
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDescribe } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
+import { setCanvas } from '@/services/canvas-accessor.js';
+
+afterEach(() => {
+  setCanvas(undefined);
+});
 
 describe('dataframeDescribe', () => {
   it('returns empty tables with enrichment notice when canvas is not enabled', async () => {
     const ctx = createMockContext({ errors: dataframeDescribe.errors });
-    // ctx has no canvas attached — simulates CANVAS_PROVIDER_TYPE unset
+    // No setCanvas call — simulates CANVAS_PROVIDER_TYPE unset
     const input = dataframeDescribe.input.parse({});
     const result = await dataframeDescribe.handler(input, ctx);
 
@@ -73,7 +79,7 @@ describe('dataframeDescribe', () => {
         ),
     };
     const ctx = createMockContext({ errors: dataframeDescribe.errors });
-    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+    setCanvas(mockCanvas as unknown as DataCanvas);
 
     const input = dataframeDescribe.input.parse({ canvas_id: 'xxxx-invalid' });
     await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
@@ -81,24 +87,33 @@ describe('dataframeDescribe', () => {
     });
   });
 
-  it('does not re-route to canvas_not_found when canvas_id is omitted and acquire rejects', async () => {
-    // When canvas_id is omitted, acquire creates a new canvas — NotFound should not occur
-    // in practice, but if it does for another reason, we should not swallow it as canvas_not_found.
-    const unexpectedError = new McpError(
-      JsonRpcErrorCode.NotFound,
-      'Canvas registry is shutting down.',
-      { tenantId: 'default' },
-    );
-    const mockCanvas = {
-      acquire: vi.fn().mockRejectedValue(unexpectedError),
-    };
+  it('throws canvas_id_required when canvas is enabled and canvas_id is omitted', async () => {
+    // acquire(undefined) would mint a fresh empty canvas and describe it as empty —
+    // the handler must fail fast instead of ever calling acquire without an id.
+    const mockCanvas = { acquire: vi.fn() };
     const ctx = createMockContext({ errors: dataframeDescribe.errors });
-    (ctx as unknown as { core: { canvas: typeof mockCanvas } }).core = { canvas: mockCanvas };
+    setCanvas(mockCanvas as unknown as DataCanvas);
 
     const input = dataframeDescribe.input.parse({});
-    // Should re-throw the raw error, not convert to canvas_not_found
-    await expect(dataframeDescribe.handler(input, ctx)).rejects.toThrow(
-      'Canvas registry is shutting down.',
-    );
+    await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'canvas_id_required',
+        recovery: { hint: expect.stringContaining('socrata_query_dataset') },
+      },
+    });
+    expect(mockCanvas.acquire).not.toHaveBeenCalled();
+  });
+
+  it('throws canvas_id_required for a blank canvas_id when canvas is enabled', async () => {
+    const mockCanvas = { acquire: vi.fn() };
+    const ctx = createMockContext({ errors: dataframeDescribe.errors });
+    setCanvas(mockCanvas as unknown as DataCanvas);
+
+    const input = dataframeDescribe.input.parse({ canvas_id: '   ' });
+    await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'canvas_id_required' },
+    });
+    expect(mockCanvas.acquire).not.toHaveBeenCalled();
   });
 });

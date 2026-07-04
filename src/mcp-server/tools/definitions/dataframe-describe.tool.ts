@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { getCanvas } from '@/services/canvas-accessor.js';
 
 const ColumnInfoSchema = z
   .object({
@@ -37,7 +38,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       .string()
       .optional()
       .describe(
-        'Canvas ID returned from socrata_query_dataset. Omit to list all tables visible in the current session.',
+        'Canvas ID returned by socrata_query_dataset when a large result spills to canvas. Required in practice when canvas is enabled — canvases cannot be enumerated, so omitting it fails with canvas_id_required instead of listing tables.',
       ),
   }),
   output: z.object({
@@ -60,16 +61,23 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
 
   errors: [
     {
+      reason: 'canvas_id_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Canvas is enabled but canvas_id was omitted or blank.',
+      recovery:
+        'Pass the canvas_id returned by socrata_query_dataset when its result spilled to canvas. Canvases cannot be enumerated — if the token was lost, re-run socrata_query_dataset to stage a fresh canvas.',
+    },
+    {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Provided canvas_id does not match any registered canvas.',
       recovery:
-        'Omit canvas_id to list all active tables, or run socrata_query_dataset again to create a new canvas.',
+        'Canvas tokens expire after inactivity and cannot be listed. Re-run socrata_query_dataset to stage a fresh canvas and pass the canvas_id it returns.',
     },
   ],
 
   async handler(input, ctx) {
-    const canvas = (ctx as unknown as { core?: { canvas?: DataCanvas } }).core?.canvas;
+    const canvas = getCanvas();
 
     if (!canvas) {
       ctx.enrich.notice(
@@ -79,15 +87,20 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     }
 
     const canvasIdInput = input.canvas_id?.trim() ? input.canvas_id.trim() : undefined;
+    if (!canvasIdInput) {
+      // acquire(undefined) would mint a fresh empty canvas and describe it as
+      // empty — a misleading silent success. Fail fast instead.
+      throw ctx.fail(
+        'canvas_id_required',
+        'canvas_id is required when canvas is enabled — omitting it would create a new empty canvas, not list existing tables.',
+        { ...ctx.recoveryFor('canvas_id_required') },
+      );
+    }
     let instance: Awaited<ReturnType<DataCanvas['acquire']>>;
     try {
       instance = await canvas.acquire(canvasIdInput, ctx);
     } catch (err) {
-      if (
-        canvasIdInput !== undefined &&
-        err instanceof McpError &&
-        err.code === JsonRpcErrorCode.NotFound
-      ) {
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw ctx.fail('canvas_not_found', err.message, {
           ...ctx.recoveryFor('canvas_not_found'),
         });

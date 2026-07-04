@@ -5,7 +5,11 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  configurationError,
+  serviceUnavailable,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
@@ -102,7 +106,7 @@ export class SocrataService {
   }
 
   /** Fetch JSON from a URL with retry, timeout, and SODA error detection. */
-  private async fetchJson<T>(url: string, ctx: Context): Promise<T> {
+  private fetchJson<T>(url: string, ctx: Context): Promise<T> {
     return withRetry(
       async () => {
         const response = await fetch(url, {
@@ -112,6 +116,8 @@ export class SocrataService {
 
         if (!response.ok) {
           // Try to read structured SODA error before delegating to httpErrorFromResponse.
+          // The error-code key varies by subsystem: compiler errors use `code`,
+          // query-coordinator errors use `errorCode` — accept either.
           const text = await response.text();
           let sodaErr: SodaError | undefined;
           try {
@@ -119,7 +125,7 @@ export class SocrataService {
             if (
               typeof parsed === 'object' &&
               parsed !== null &&
-              'code' in parsed &&
+              ('code' in parsed || 'errorCode' in parsed) &&
               'message' in parsed
             ) {
               sodaErr = parsed as SodaError;
@@ -130,12 +136,26 @@ export class SocrataService {
 
           if (sodaErr) {
             // Map SODA error codes to appropriate MCP errors.
+            const socrataCode = sodaErr.code ?? sodaErr.errorCode ?? '';
             if (response.status === 400) {
               // All 400s with a SODA body are SoQL/query errors — propagate upstream message.
               throw validationError(`SoQL error: ${sodaErr.message}`, {
                 reason: 'soql_error',
-                socrataCode: sodaErr.code ?? '',
+                socrataCode,
               });
+            }
+            if (response.status === 403 && /app[_ ]token/i.test(sodaErr.message)) {
+              // Invalid SOCRATA_APP_TOKEN — a config problem, not a caller-permissions one.
+              // Discriminate on the message content: a private-dataset denial also returns
+              // 403 permission_denied but without mentioning the app token, and must keep
+              // the generic path below. Never include the token value here.
+              throw configurationError(
+                `Socrata rejected the configured app token: ${sodaErr.message}`,
+                {
+                  reason: 'invalid_app_token',
+                  socrataCode,
+                },
+              );
             }
             if (response.status === 429) {
               throw serviceUnavailable(`Socrata API rate limited: ${sodaErr.message}`, {
@@ -335,8 +355,10 @@ export class SocrataService {
     const rows = await this.fetchJson<Record<string, unknown>[]>(dataUrl, ctx);
 
     // Fetch total count separately when result is at the limit (may be truncated).
+    // Skipped for grouped queries: the recount carries only where/search, so it
+    // would count matching source rows, not result groups — a misleading number.
     let totalCount: number | undefined;
-    if (rows.length === limit) {
+    if (rows.length === limit && !opts.group) {
       const countParams = new URLSearchParams();
       countParams.set('$select', 'count(*)');
       if (opts.where) countParams.set('$where', opts.where);

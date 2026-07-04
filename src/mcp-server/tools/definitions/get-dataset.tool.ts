@@ -79,6 +79,13 @@ export const getDataset = tool('socrata_get_dataset', {
       recovery:
         'Use socrata_find_datasets to search again — the dataset may have been retired or replaced.',
     },
+    {
+      reason: 'invalid_app_token',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'Socrata rejected the configured SOCRATA_APP_TOKEN.',
+      recovery:
+        'Unset SOCRATA_APP_TOKEN or replace it with a valid Socrata app token, then restart the server.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -99,12 +106,16 @@ export const getDataset = tool('socrata_get_dataset', {
     try {
       meta = await svc.getDataset(domain, input.dataset_id, ctx);
     } catch (err) {
-      if (
-        err instanceof McpError &&
-        err.code === JsonRpcErrorCode.NotFound &&
-        (err.data as Record<string, unknown> | undefined)?.reason === 'not_found'
-      ) {
-        throw ctx.fail('not_found', err.message, { ...ctx.recoveryFor('not_found') });
+      // Re-throw service failures that map to declared contract reasons via
+      // ctx.fail so the contract recovery hint reaches the wire.
+      if (err instanceof McpError) {
+        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
+        if (reason === 'not_found' || reason === 'invalid_app_token') {
+          throw ctx.fail(reason, err.message, {
+            ...(err.data as Record<string, unknown>),
+            ...ctx.recoveryFor(reason),
+          });
+        }
       }
       throw err;
     }

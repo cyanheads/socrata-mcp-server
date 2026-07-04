@@ -80,9 +80,14 @@ export type QueryResult = {
   assembledQuery: string;
 };
 
-/** Structured SODA API error shape. */
+/**
+ * Structured SODA API error shape. The error-code key varies by upstream
+ * subsystem: the SoQL compiler emits `code` (e.g. `query.compiler.malformed`),
+ * the query coordinator emits `errorCode` (e.g. `query.soql.no-such-column`).
+ */
 export type SodaError = {
-  code: string;
+  code?: string;
+  errorCode?: string;
   message: string;
   data?: Record<string, unknown>;
 };

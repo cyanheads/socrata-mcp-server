@@ -4,9 +4,9 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 import type { QueryResult } from '@/services/socrata/types.js';
 import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
@@ -82,7 +82,7 @@ export const queryDataset = tool('socrata_query_dataset', {
       .number()
       .optional()
       .describe(
-        'Total matching rows when result is truncated (row_count < total_count). Absent when the full result fits.',
+        'Total matching source rows when a plain row query is truncated (row_count < total_count). Absent when the full result fits and for grouped/aggregate queries (group set), where a source-row count would not describe the returned groups.',
       ),
     assembled_query: z
       .string()
@@ -110,7 +110,7 @@ export const queryDataset = tool('socrata_query_dataset', {
       .boolean()
       .optional()
       .describe(
-        'True when rows filled the limit — more rows match (see total_count). Spills to canvas when enabled.',
+        'True when rows filled the limit — more rows may match (see total_count when present). Spills to canvas when enabled.',
       ),
     shown: z.number().optional().describe('Rows returned in this response when capped.'),
     cap: z.number().optional().describe('The row limit that was applied when capped.'),
@@ -144,6 +144,13 @@ export const queryDataset = tool('socrata_query_dataset', {
       when: 'SODA endpoint returned 429.',
       retryable: true,
       recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
+    },
+    {
+      reason: 'invalid_app_token',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'Socrata rejected the configured SOCRATA_APP_TOKEN.',
+      recovery:
+        'Unset SOCRATA_APP_TOKEN or replace it with a valid Socrata app token, then restart the server.',
     },
   ],
 
@@ -189,12 +196,21 @@ export const queryDataset = tool('socrata_query_dataset', {
         ctx,
       );
     } catch (err) {
-      if (
-        err instanceof McpError &&
-        err.code === JsonRpcErrorCode.NotFound &&
-        (err.data as Record<string, unknown> | undefined)?.reason === 'not_found'
-      ) {
-        throw ctx.fail('not_found', err.message, { ...ctx.recoveryFor('not_found') });
+      // Re-throw service failures that map to declared contract reasons via
+      // ctx.fail so the contract recovery hint reaches the wire.
+      if (err instanceof McpError) {
+        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
+        if (
+          reason === 'not_found' ||
+          reason === 'soql_error' ||
+          reason === 'rate_limited' ||
+          reason === 'invalid_app_token'
+        ) {
+          throw ctx.fail(reason, err.message, {
+            ...(err.data as Record<string, unknown>),
+            ...ctx.recoveryFor(reason),
+          });
+        }
       }
       throw err;
     }
@@ -205,17 +221,18 @@ export const queryDataset = tool('socrata_query_dataset', {
           'Check column names and quoting with socrata_get_dataset, or broaden the filter.',
       );
     } else if (qResult.rowCount >= input.limit) {
+      // Only claim an exact count when the recount actually produced one —
+      // total_count is absent for grouped queries and when the recount failed.
       ctx.enrich.truncated({
         shown: qResult.rowCount,
         cap: input.limit,
-        guidance:
-          'Rows filled the limit — more rows match (exact count in total_count). Page with offset, raise limit (max 5000), or query the spilled canvas via socrata_dataframe_query when CANVAS_PROVIDER_TYPE=duckdb.',
+        guidance: `Rows filled the limit — more rows may match${qResult.totalCount != null ? ' (exact count in total_count)' : ''}. Page with offset, raise limit (max 5000), or query the spilled canvas via socrata_dataframe_query when CANVAS_PROVIDER_TYPE=duckdb.`,
       });
     }
 
     // Attempt DataCanvas spillover when canvas is available and result hit the limit.
     let canvasId: string | undefined;
-    const canvas = (ctx as unknown as { core?: { canvas?: DataCanvas } }).core?.canvas;
+    const canvas = getCanvas();
     if (canvas && qResult.rowCount >= input.limit) {
       try {
         const instance = await canvas.acquire(
@@ -223,7 +240,16 @@ export const queryDataset = tool('socrata_query_dataset', {
           ctx,
         );
         const tableName = `${input.dataset_id.replaceAll('-', '_')}_rows`;
-        await instance.registerTable(tableName, qResult.rows);
+        // Socrata system columns (`:@computed_region_*` and other `:`-prefixed
+        // keys) are not valid canvas identifiers and would fail registerTable —
+        // strip them from the canvas projection. The inline `rows` in the
+        // response keep every column; only the spilled copy is filtered.
+        const canvasRows = qResult.rows.map((row) =>
+          Object.keys(row).some((k) => k.startsWith(':'))
+            ? Object.fromEntries(Object.entries(row).filter(([k]) => !k.startsWith(':')))
+            : row,
+        );
+        await instance.registerTable(tableName, canvasRows);
         canvasId = instance.canvasId;
         ctx.log.info('Spilled query result to DataCanvas', {
           canvasId,
