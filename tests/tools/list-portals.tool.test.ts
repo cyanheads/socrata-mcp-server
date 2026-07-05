@@ -89,6 +89,23 @@ describe('listPortals', () => {
     expect(result.portals[0].dataset_count).toBe(100);
   });
 
+  it('passes through a genuine zero count and a null (unavailable) count untouched', async () => {
+    mockListPortals.mockResolvedValue([
+      { domain: 'data.seattle.gov', organization: 'City of Seattle', datasetCount: 0 },
+      {
+        domain: 'data.gov',
+        organization: 'U.S. Federal Government (data.gov)',
+        datasetCount: null,
+      },
+    ]);
+    const ctx = createMockContext({ errors: listPortals.errors });
+    const input = listPortals.input.parse({});
+    const result = await listPortals.handler(input, ctx);
+
+    expect(result.portals[0].dataset_count).toBe(0);
+    expect(result.portals[1].dataset_count).toBeNull();
+  });
+
   it('formats portals as a markdown table', () => {
     const output = {
       portals: [
@@ -108,5 +125,18 @@ describe('listPortals', () => {
     const output = { portals: [] };
     const blocks = listPortals.format!(output);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
+  });
+
+  it('renders 0 as a real count and null as unavailable in the table', () => {
+    const output = {
+      portals: [
+        { domain: 'data.seattle.gov', organization: 'City of Seattle', dataset_count: 0 },
+        { domain: 'data.gov', dataset_count: null },
+      ],
+    };
+    const blocks = listPortals.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    expect(text).toContain('| data.seattle.gov | City of Seattle | 0 |');
+    expect(text).toContain('| data.gov | — | unavailable |');
   });
 });

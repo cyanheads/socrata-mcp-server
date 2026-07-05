@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { inlineUpstream, upstreamBlockquote } from '@/mcp-server/tools/upstream-text.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const DatasetResultSchema = z
@@ -197,11 +198,17 @@ export const findDatasets = tool('socrata_find_datasets', {
     lines.push(`\n**${result.results.length} datasets found**\n`);
 
     for (const ds of result.results) {
-      lines.push(`### ${ds.name}`);
+      // Dataset names and descriptions are upstream-controlled — render names
+      // quoted on a single line and descriptions as labeled blockquotes.
+      lines.push(`### "${inlineUpstream(ds.name)}"`);
       lines.push(`**ID:** ${ds.dataset_id} | **Domain:** ${ds.domain}`);
       if (ds.category != null) lines.push(`**Category:** ${ds.category}`);
       if (ds.tags.length) lines.push(`**Tags:** ${ds.tags.join(', ')}`);
-      if (ds.description != null) lines.push(ds.description);
+      if (ds.description != null) {
+        // Trailing blank line seals the blockquote — without it a following
+        // metadata line would be a lazy continuation of the quote.
+        lines.push(...upstreamBlockquote('Upstream dataset description', ds.description), '');
+      }
       if (ds.column_names.length) {
         lines.push(
           `**Columns (preview):** ${ds.column_names.slice(0, 8).join(', ')}${ds.column_names.length > 8 ? ` (+${ds.column_names.length - 8} more)` : ''}`,

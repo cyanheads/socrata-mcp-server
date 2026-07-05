@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 import type { QueryResult } from '@/services/socrata/types.js';
@@ -300,13 +301,15 @@ export const queryDataset = tool('socrata_query_dataset', {
     const cols = Object.keys(firstRow ?? {});
 
     if (cols.length > 0 && cols.length <= 10) {
-      lines.push(`| ${cols.join(' | ')} |`);
+      // Row values (and column keys) are upstream-controlled — escape pipes and
+      // newlines so a value can never split its cell or its row.
+      lines.push(`| ${cols.map((c) => escapeTableCell(c)).join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
       for (const row of result.rows.slice(0, 50)) {
         const cells = cols.map((c) => {
           const v = row[c];
           const s = v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
-          return s.replace(/\|/g, '\\|');
+          return escapeTableCell(s);
         });
         lines.push(`| ${cells.join(' | ')} |`);
       }
@@ -314,11 +317,10 @@ export const queryDataset = tool('socrata_query_dataset', {
         lines.push(`\n_... and ${result.rows.length - 50} more rows_`);
       }
     } else {
-      // Fall back to JSON for wide datasets.
+      // Fall back to fenced JSON for wide datasets — the fence is sized past any
+      // backtick run in the payload so row values cannot break out of it.
       for (const row of result.rows.slice(0, 20)) {
-        lines.push('```json');
-        lines.push(JSON.stringify(row));
-        lines.push('```');
+        lines.push(...fencedJson(JSON.stringify(row)));
       }
       if (result.rows.length > 20) {
         lines.push(`\n_... and ${result.rows.length - 20} more rows_`);

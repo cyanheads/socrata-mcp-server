@@ -21,6 +21,7 @@ import type {
   PortalEntry,
   QueryDatasetOptions,
   QueryResult,
+  RowCountSource,
   SodaError,
 } from './types.js';
 import { DATASET_ID_PATTERN } from './types.js';
@@ -30,54 +31,109 @@ const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
 
 /**
  * Curated list of well-known Socrata portals.
- * The Discovery API no longer exposes a /domains listing endpoint (returns 404).
+ * The Discovery API no longer exposes a /domains listing endpoint (returns 404),
+ * so membership is static; per-portal dataset counts are fetched live from the
+ * catalog endpoint and TTL-cached (see the portal-count cache below).
  */
-const KNOWN_PORTALS: PortalEntry[] = [
-  { domain: 'data.cityofnewyork.us', organization: 'City of New York', datasetCount: 0 },
-  { domain: 'data.seattle.gov', organization: 'City of Seattle', datasetCount: 0 },
-  { domain: 'data.cityofchicago.org', organization: 'City of Chicago', datasetCount: 0 },
-  { domain: 'data.sfgov.org', organization: 'City and County of San Francisco', datasetCount: 0 },
-  { domain: 'data.lacity.org', organization: 'City of Los Angeles', datasetCount: 0 },
-  { domain: 'data.boston.gov', organization: 'City of Boston', datasetCount: 0 },
-  { domain: 'data.austintexas.gov', organization: 'City of Austin, TX', datasetCount: 0 },
-  { domain: 'data.baltimorecity.gov', organization: 'City of Baltimore', datasetCount: 0 },
-  { domain: 'data.nashville.gov', organization: 'City of Nashville', datasetCount: 0 },
-  { domain: 'data.detroitmi.gov', organization: 'City of Detroit', datasetCount: 0 },
-  { domain: 'data.cityofmadison.com', organization: 'City of Madison, WI', datasetCount: 0 },
-  { domain: 'data.colorado.gov', organization: 'State of Colorado', datasetCount: 0 },
-  { domain: 'data.ny.gov', organization: 'State of New York', datasetCount: 0 },
-  { domain: 'data.texas.gov', organization: 'State of Texas', datasetCount: 0 },
-  { domain: 'data.wa.gov', organization: 'State of Washington', datasetCount: 0 },
-  { domain: 'data.oregon.gov', organization: 'State of Oregon', datasetCount: 0 },
-  { domain: 'data.illinois.gov', organization: 'State of Illinois', datasetCount: 0 },
-  { domain: 'data.maryland.gov', organization: 'State of Maryland', datasetCount: 0 },
-  { domain: 'data.michigan.gov', organization: 'State of Michigan', datasetCount: 0 },
-  { domain: 'data.ohio.gov', organization: 'State of Ohio', datasetCount: 0 },
-  { domain: 'data.ct.gov', organization: 'State of Connecticut', datasetCount: 0 },
-  { domain: 'data.iowa.gov', organization: 'State of Iowa', datasetCount: 0 },
-  { domain: 'data.hawaii.gov', organization: 'State of Hawaii', datasetCount: 0 },
-  { domain: 'data.kcmo.org', organization: 'City of Kansas City, MO', datasetCount: 0 },
-  { domain: 'data.montgomerycountymd.gov', organization: 'Montgomery County, MD', datasetCount: 0 },
-  { domain: 'opendata.dc.gov', organization: 'District of Columbia', datasetCount: 0 },
-  { domain: 'data.gov', organization: 'U.S. Federal Government (data.gov)', datasetCount: 0 },
-  {
-    domain: 'data.cdc.gov',
-    organization: 'Centers for Disease Control and Prevention',
-    datasetCount: 0,
-  },
-  {
-    domain: 'data.hhs.gov',
-    organization: 'U.S. Dept. of Health and Human Services',
-    datasetCount: 0,
-  },
-  { domain: 'data.cityofsacramento.org', organization: 'City of Sacramento', datasetCount: 0 },
-  { domain: 'data.sandiego.gov', organization: 'City of San Diego', datasetCount: 0 },
-  { domain: 'data.mesaaz.gov', organization: 'City of Mesa, AZ', datasetCount: 0 },
-  { domain: 'data.tucsonaz.gov', organization: 'City of Tucson, AZ', datasetCount: 0 },
-  { domain: 'data.opendatasoft.com', organization: 'OpenDataSoft', datasetCount: 0 },
-  { domain: 'opendata.minneapolismn.gov', organization: 'City of Minneapolis', datasetCount: 0 },
-  { domain: 'data.cityoflewisville.com', organization: 'City of Lewisville, TX', datasetCount: 0 },
+const KNOWN_PORTALS: ReadonlyArray<Omit<PortalEntry, 'datasetCount'>> = [
+  { domain: 'data.cityofnewyork.us', organization: 'City of New York' },
+  { domain: 'data.seattle.gov', organization: 'City of Seattle' },
+  { domain: 'data.cityofchicago.org', organization: 'City of Chicago' },
+  { domain: 'data.sfgov.org', organization: 'City and County of San Francisco' },
+  { domain: 'data.lacity.org', organization: 'City of Los Angeles' },
+  { domain: 'data.boston.gov', organization: 'City of Boston' },
+  { domain: 'data.austintexas.gov', organization: 'City of Austin, TX' },
+  { domain: 'data.baltimorecity.gov', organization: 'City of Baltimore' },
+  { domain: 'data.nashville.gov', organization: 'City of Nashville' },
+  { domain: 'data.detroitmi.gov', organization: 'City of Detroit' },
+  { domain: 'data.cityofmadison.com', organization: 'City of Madison, WI' },
+  { domain: 'data.colorado.gov', organization: 'State of Colorado' },
+  { domain: 'data.ny.gov', organization: 'State of New York' },
+  { domain: 'data.texas.gov', organization: 'State of Texas' },
+  { domain: 'data.wa.gov', organization: 'State of Washington' },
+  { domain: 'data.oregon.gov', organization: 'State of Oregon' },
+  { domain: 'data.illinois.gov', organization: 'State of Illinois' },
+  { domain: 'data.maryland.gov', organization: 'State of Maryland' },
+  { domain: 'data.michigan.gov', organization: 'State of Michigan' },
+  { domain: 'data.ohio.gov', organization: 'State of Ohio' },
+  { domain: 'data.ct.gov', organization: 'State of Connecticut' },
+  { domain: 'data.iowa.gov', organization: 'State of Iowa' },
+  { domain: 'data.hawaii.gov', organization: 'State of Hawaii' },
+  { domain: 'data.kcmo.org', organization: 'City of Kansas City, MO' },
+  { domain: 'data.montgomerycountymd.gov', organization: 'Montgomery County, MD' },
+  { domain: 'opendata.dc.gov', organization: 'District of Columbia' },
+  { domain: 'data.gov', organization: 'U.S. Federal Government (data.gov)' },
+  { domain: 'data.cdc.gov', organization: 'Centers for Disease Control and Prevention' },
+  { domain: 'data.hhs.gov', organization: 'U.S. Dept. of Health and Human Services' },
+  { domain: 'data.cityofsacramento.org', organization: 'City of Sacramento' },
+  { domain: 'data.sandiego.gov', organization: 'City of San Diego' },
+  { domain: 'data.mesaaz.gov', organization: 'City of Mesa, AZ' },
+  { domain: 'data.tucsonaz.gov', organization: 'City of Tucson, AZ' },
+  { domain: 'data.opendatasoft.com', organization: 'OpenDataSoft' },
+  { domain: 'opendata.minneapolismn.gov', organization: 'City of Minneapolis' },
+  { domain: 'data.cityoflewisville.com', organization: 'City of Lewisville, TX' },
 ];
+
+/** How long a successful portal-count refresh stays fresh. */
+const PORTAL_COUNT_TTL_MS = 24 * 60 * 60 * 1000;
+/** Retry sooner when a refresh produced no counts at all (upstream outage). */
+const PORTAL_COUNT_RETRY_MS = 5 * 60 * 1000;
+/** Cap on concurrent Discovery count requests during a cache warm. */
+const PORTAL_COUNT_CONCURRENCY = 8;
+
+/**
+ * Module-scope TTL cache of per-domain dataset counts. Deliberately module-scope
+ * rather than `ctx.state`: counts are public upstream reference data shared by
+ * every tenant, not tenant state. A failed refresh keeps last-known-good values;
+ * domains that have never resolved surface as `datasetCount: null`.
+ */
+let portalCounts = new Map<string, number>();
+let portalCountsNextRefreshAt = 0;
+let portalCountsRefresh: Promise<void> | undefined;
+
+/** Reset the module-scope portal-count cache. Test-only. */
+export function resetPortalCountCache(): void {
+  portalCounts = new Map();
+  portalCountsNextRefreshAt = 0;
+  portalCountsRefresh = undefined;
+}
+
+/** Parse an upstream numeric value (number or non-blank numeric string); undefined otherwise. */
+function toFiniteNumber(value: unknown): number | undefined {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : Number.NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Resolve a dataset's row count from views-API metadata. Prefers the top-level
+ * `cachedContents` fields; when those are absent (common on live portals),
+ * derives the count as the maximum per-column `cachedContents.count` — upstream
+ * reports `count = non_null + null` per column, so the max column count is the
+ * closest available proxy for total rows.
+ */
+function deriveRowCount(
+  raw: Record<string, unknown>,
+  rawColumns: unknown[],
+): { rowCount?: number; rowCountSource?: RowCountSource } {
+  const top = (raw.cachedContents ?? {}) as Record<string, unknown>;
+  const direct = toFiniteNumber(top.total_rows) ?? toFiniteNumber(top.rows_reviewed);
+  if (direct != null) {
+    return { rowCount: direct, rowCountSource: 'top_level_cached_contents' };
+  }
+
+  let max: number | undefined;
+  for (const c of rawColumns) {
+    const cached = ((c as Record<string, unknown>).cachedContents ?? {}) as Record<string, unknown>;
+    const count = toFiniteNumber(cached.count);
+    if (count != null && (max == null || count > max)) max = count;
+  }
+  return max != null ? { rowCount: max, rowCountSource: 'column_cached_contents' } : {};
+}
 
 /** Socrata geo/spatial column type names (dataTypeName or renderTypeName). */
 const GEO_TYPES = new Set([
@@ -290,16 +346,17 @@ export class SocrataService {
         // Keep columns with empty fieldName only if they have a known geo type.
         if (!fieldName && !GEO_TYPES.has(dataType.toLowerCase())) return null;
         const cachedContents = (col.cachedContents ?? {}) as Record<string, unknown>;
+        const nonNullCount = toFiniteNumber(cachedContents.non_null);
         return {
           fieldName: fieldName || dataType,
           dataType,
           ...(col.description ? { description: String(col.description) } : {}),
-          ...(cachedContents.non_null != null
-            ? { nonNullCount: Number(cachedContents.non_null) }
-            : {}),
+          ...(nonNullCount != null ? { nonNullCount } : {}),
         };
       })
       .filter((c): c is DatasetColumn => c !== null);
+
+    const { rowCount, rowCountSource } = deriveRowCount(raw, rawColumns);
 
     return {
       datasetId,
@@ -314,15 +371,8 @@ export class SocrataService {
       ...(raw.license
         ? { license: String((raw.license as Record<string, unknown>).name ?? raw.license) }
         : {}),
-      ...(raw.cachedContents
-        ? {
-            rowCount: Number(
-              (raw.cachedContents as Record<string, unknown>).total_rows ??
-                (raw.cachedContents as Record<string, unknown>).rows_reviewed ??
-                0,
-            ),
-          }
-        : {}),
+      ...(rowCount != null ? { rowCount } : {}),
+      ...(rowCountSource ? { rowCountSource } : {}),
       columns,
     };
   }
@@ -389,9 +439,76 @@ export class SocrataService {
     };
   }
 
-  /** Return a curated static list of well-known Socrata portals. */
-  listPortals(_ctx: Context): Promise<PortalEntry[]> {
-    return Promise.resolve(KNOWN_PORTALS);
+  /**
+   * List the curated well-known Socrata portals with live dataset counts.
+   * Counts come from the TTL-cached Discovery catalog lookups; a portal whose
+   * count has never resolved carries `datasetCount: null` rather than failing
+   * the whole listing.
+   */
+  async listPortals(ctx: Context): Promise<PortalEntry[]> {
+    if (Date.now() >= portalCountsNextRefreshAt) {
+      // Deduplicate concurrent refreshes — all callers await the same warm.
+      portalCountsRefresh ??= this.refreshPortalCounts(ctx).finally(() => {
+        portalCountsRefresh = undefined;
+      });
+      await portalCountsRefresh;
+    }
+    return KNOWN_PORTALS.map((p) => ({
+      ...p,
+      datasetCount: portalCounts.get(p.domain) ?? null,
+    }));
+  }
+
+  /**
+   * Warm the portal-count cache: one `limit=0` Discovery catalog query per
+   * known domain (`resultSetSize` is the count of dataset-type assets).
+   * Per-domain failures are logged and skipped — last-known-good values are
+   * retained. A refresh that resolves nothing schedules a short retry instead
+   * of holding an empty cache for the full TTL.
+   */
+  private async refreshPortalCounts(ctx: Context): Promise<void> {
+    const domains = KNOWN_PORTALS.map((p) => p.domain);
+    ctx.log.info('Refreshing portal dataset counts', { domains: domains.length });
+
+    let fetched = 0;
+    for (let i = 0; i < domains.length; i += PORTAL_COUNT_CONCURRENCY) {
+      const chunk = domains.slice(i, i + PORTAL_COUNT_CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (domain) => {
+          try {
+            portalCounts.set(domain, await this.fetchPortalDatasetCount(domain, ctx));
+            fetched++;
+          } catch (err) {
+            ctx.log.warning('Portal dataset count fetch failed', {
+              domain,
+              error: String(err),
+            });
+          }
+        }),
+      );
+    }
+
+    portalCountsNextRefreshAt =
+      Date.now() + (fetched > 0 ? PORTAL_COUNT_TTL_MS : PORTAL_COUNT_RETRY_MS);
+    ctx.log.info('Portal dataset counts refreshed', {
+      fetched,
+      failed: domains.length - fetched,
+    });
+  }
+
+  /** Count dataset-type assets on one portal via the Discovery catalog. */
+  private async fetchPortalDatasetCount(domain: string, ctx: Context): Promise<number> {
+    const params = new URLSearchParams({ domains: domain, only: 'dataset', limit: '0' });
+    const raw = await this.fetchJson<{ resultSetSize?: number }>(
+      `${DISCOVERY_BASE}?${params.toString()}`,
+      ctx,
+    );
+    if (typeof raw.resultSetSize !== 'number' || !Number.isFinite(raw.resultSetSize)) {
+      throw serviceUnavailable('Discovery catalog count response missing resultSetSize.', {
+        domain,
+      });
+    }
+    return raw.resultSetSize;
   }
 }
 

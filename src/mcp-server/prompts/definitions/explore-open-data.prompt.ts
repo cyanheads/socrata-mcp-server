@@ -51,7 +51,7 @@ export const exploreOpenData = prompt('explore_open_data', {
           '**Step 3 — Inspect schema before querying**',
           'For the most promising dataset, call `socrata_get_dataset` to get the full column schema. Pay attention to:',
           '- Column names and data types (determines WHERE clause quoting)',
-          '- Row count (signals dataset size)',
+          '- Row count (signals dataset size; approximate — may be derived from cached column metadata, see row_count_source)',
           '- Last updated timestamp (freshness)',
           '- Number vs Text column types (Number → bare literals, Text → single-quoted strings)',
           '',

@@ -88,7 +88,7 @@ describe('getDataset', () => {
       name: 'Minimal Dataset',
       tags: [],
       columns: [],
-      // rowCount, description, category, dataUpdatedAt, license absent
+      // rowCount, rowCountSource, description, category, dataUpdatedAt, license absent
     });
 
     const input = getDataset.input.parse({ dataset_id: 'aaaa-1111' });
@@ -96,7 +96,43 @@ describe('getDataset', () => {
 
     expect(result.dataset_id).toBe('aaaa-1111');
     expect(result.row_count).toBeUndefined();
+    expect(result.row_count_source).toBeUndefined();
     expect(result.description).toBeUndefined();
+  });
+
+  it('maps a derived row count and its source through to the output', async () => {
+    const ctx = createMockContext({ errors: getDataset.errors });
+    mockGetDataset.mockResolvedValue({
+      datasetId: 'ijzp-q8t2',
+      domain: 'data.cityofchicago.org',
+      name: 'Crimes - 2001 to Present',
+      tags: [],
+      rowCount: 8585919,
+      rowCountSource: 'column_cached_contents',
+      columns: [],
+    });
+
+    const input = getDataset.input.parse({ dataset_id: 'ijzp-q8t2' });
+    const result = await getDataset.handler(input, ctx);
+
+    expect(result.row_count).toBe(8585919);
+    expect(result.row_count_source).toBe('column_cached_contents');
+  });
+
+  it('format renders the row count with its source', () => {
+    const output = {
+      dataset_id: 'ijzp-q8t2',
+      domain: 'data.cityofchicago.org',
+      name: 'Crimes - 2001 to Present',
+      tags: [],
+      row_count: 8585919,
+      row_count_source: 'column_cached_contents' as const,
+      columns: [],
+    };
+    const blocks = getDataset.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    expect(text).toContain('8,585,919');
+    expect(text).toContain('source: column_cached_contents');
   });
 
   it('formats output with ID, domain, column table', () => {

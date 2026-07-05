@@ -29,7 +29,7 @@ Six tools covering the full Socrata workflow — portal discovery, dataset searc
 
 | Tool | Description |
 |:---|:---|
-| `socrata_list_portals` | List known Socrata-powered government open-data portals with domain, organization name, and dataset count |
+| `socrata_list_portals` | List known Socrata-powered government open-data portals with domain, organization name, and approximate dataset count |
 | `socrata_find_datasets` | Search for datasets across all Socrata portals or scope to one portal via the Discovery API |
 | `socrata_get_dataset` | Fetch full metadata and typed column schema for a dataset by ID — required before writing SoQL queries |
 | `socrata_query_dataset` | Execute a SoQL query against any dataset: search, select, where, group, having, order, with DataCanvas spillover |
@@ -40,10 +40,11 @@ Six tools covering the full Socrata workflow — portal discovery, dataset searc
 
 List known Socrata-powered government open-data portals.
 
-- Backed by the Discovery API domains catalog — hundreds of city, county, state, and federal portals
+- Curated catalog of 36 well-known city, county, state, and federal portals
+- Per-portal dataset counts fetched live from the Discovery API, cached ~24 hours — approximate, point-in-time (`0` means the portal exposes no dataset assets to the catalog; `null` means the count is temporarily unavailable)
 - Client-side substring filtering on domain or organization name
 - Pagination (up to 200 per page) with offset
-- Returns domain (pass to `socrata_find_datasets`), organization name, and dataset count
+- Returns domain (pass to `socrata_find_datasets`), organization name, and approximate dataset count
 - Use this first when you don't know which portal to target
 
 ---
@@ -116,7 +117,7 @@ Run SELECT-only SQL against DataCanvas tables populated by `socrata_query_datase
 | Type | Name | Description |
 |:---|:---|:---|
 | Resource | `socrata://datasets/{domain}/{datasetId}` | Fetch full metadata and column schema for a dataset by stable URI — same payload as `socrata_get_dataset` |
-| Resource | `socrata://portals` | Paginated list of known Socrata portals with organization name and dataset count |
+| Resource | `socrata://portals` | Paginated list of known Socrata portals with organization name and approximate dataset count |
 | Prompt | `explore_open_data` | Structured six-step civic data investigation workflow: find portal → discover datasets → inspect schema → query → aggregate → synthesize |
 
 All resource data is also reachable via tools. Use the corresponding tool for agent workflows — resources are for clients that support URI-addressable data.
@@ -136,7 +137,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 Socrata-specific:
 
 - Full Socrata SODA 2.1 API integration — SoQL query builder with select, where, group, having, order, search, limit, offset
-- Discovery API for cross-portal dataset search and portal catalog
+- Discovery API for cross-portal dataset search and per-portal dataset counts (curated 36-portal catalog, counts cached ~24h)
 - App token support (`SOCRATA_APP_TOKEN`) for higher per-IP rate limits
 - Configurable default portal domain via `SOCRATA_DEFAULT_DOMAIN`
 - Computed region column filtering to reduce noise in wide datasets

@@ -133,4 +133,36 @@ describe('dataframeQuery', () => {
     expect(text).toContain('```json');
     expect(text).toContain('xyz9876543');
   });
+
+  it('escapes upstream row values and column keys in table mode', () => {
+    const output = {
+      rows: [{ 'weird|key': 'pipe|value', note: 'line1\nline2', slash: 'a\\|b' }],
+      row_count: 1,
+      sql: 'SELECT * FROM t',
+      canvas_id: 'abc1234567',
+    };
+    const blocks = dataframeQuery.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    expect(text).toContain('weird\\|key');
+    expect(text).toContain('pipe\\|value');
+    expect(text).not.toMatch(/\n\| [^|\\]*pipe\|value/);
+    expect(text).toContain('line1 line2');
+    expect(text).toContain('a\\\\\\|b');
+  });
+
+  it('sizes wide-mode fences past embedded backtick runs', () => {
+    const cols = Array.from({ length: 15 }, (_, i) => `col${i}`);
+    const row = Object.fromEntries(cols.map((c) => [c, c === 'col0' ? 'x ``` y' : 'v']));
+    const output = {
+      rows: [row],
+      row_count: 1,
+      sql: 'SELECT * FROM wide_table',
+      canvas_id: 'xyz9876543',
+    };
+    const blocks = dataframeQuery.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    const fences = text.match(/`{3,}/g) ?? [];
+    const maxFence = Math.max(...fences.map((f) => f.length));
+    expect(maxFence).toBeGreaterThanOrEqual(4);
+  });
 });

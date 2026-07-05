@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 export const dataframeQuery = tool('socrata_dataframe_query', {
@@ -149,11 +150,11 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     const cols = Object.keys(firstRow ?? {});
 
     if (cols.length > 0 && cols.length <= 10) {
-      lines.push(`| ${cols.join(' | ')} |`);
+      lines.push(`| ${cols.map((c) => escapeTableCell(c)).join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
       for (const row of result.rows.slice(0, 50)) {
         const cells = cols.map((c) =>
-          String((row as Record<string, unknown>)[c] ?? '').replace(/\|/g, '\\|'),
+          escapeTableCell(String((row as Record<string, unknown>)[c] ?? '')),
         );
         lines.push(`| ${cells.join(' | ')} |`);
       }
@@ -162,9 +163,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       }
     } else {
       for (const row of result.rows.slice(0, 20)) {
-        lines.push('```json');
-        lines.push(JSON.stringify(row));
-        lines.push('```');
+        lines.push(...fencedJson(JSON.stringify(row)));
       }
       if (result.rows.length > 20) {
         lines.push(`\n_... and ${result.rows.length - 20} more rows_`);

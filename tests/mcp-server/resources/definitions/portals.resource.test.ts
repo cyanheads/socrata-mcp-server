@@ -57,6 +57,19 @@ describe('portalsResource', () => {
       expect(result.portals[1].organization).toBeUndefined();
     });
 
+    it('passes through zero and null dataset counts untouched', async () => {
+      mockListPortals.mockResolvedValue([
+        { domain: 'data.seattle.gov', organization: 'City of Seattle', datasetCount: 0 },
+        { domain: 'data.gov', datasetCount: null }, // count temporarily unavailable
+      ]);
+      const ctx = createMockContext();
+      const params = portalsResource.params.parse({});
+      const result = await portalsResource.handler(params, ctx);
+
+      expect(result.portals[0].dataset_count).toBe(0);
+      expect(result.portals[1].dataset_count).toBeNull();
+    });
+
     it('handles an empty portal list from the service', async () => {
       mockListPortals.mockResolvedValue([]);
       const ctx = createMockContext();

@@ -16,14 +16,19 @@ const PortalEntrySchema = z
       .string()
       .optional()
       .describe('Organization name when available (e.g. City of Seattle).'),
-    dataset_count: z.number().describe('Number of datasets on this portal.'),
+    dataset_count: z
+      .number()
+      .nullable()
+      .describe(
+        'Approximate count of dataset-type assets on this portal from the Discovery API catalog (point-in-time, refreshed ~daily). 0 means the portal exposes no dataset assets to the catalog; null means the live count is temporarily unavailable.',
+      ),
   })
   .describe('A single Socrata portal.');
 
 export const listPortals = tool('socrata_list_portals', {
   title: 'List Socrata Portals',
   description:
-    'List known Socrata-powered government open-data portals with their domain, organization name, and dataset count. Backed by the Discovery API domains catalog. Filtering is client-side substring match on the query parameter. Use this first when you do not know which portal to target, then pass the domain to socrata_find_datasets.',
+    'List known Socrata-powered government open-data portals with their domain, organization name, and approximate dataset count. The catalog is a curated list of 36 well-known portals; dataset counts are fetched from the Discovery API and cached for ~24 hours. Filtering is client-side substring match on the query parameter. Use this first when you do not know which portal to target, then pass the domain to socrata_find_datasets.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     query: z
@@ -111,12 +116,13 @@ export const listPortals = tool('socrata_list_portals', {
       return [{ type: 'text', text: lines.join('\n') }];
     }
 
-    lines.push('| Domain | Organization | Datasets |');
-    lines.push('|:-------|:-------------|:---------|');
+    lines.push('| Domain | Organization | Datasets (approx.) |');
+    lines.push('|:-------|:-------------|:-------------------|');
     for (const p of result.portals) {
-      lines.push(
-        `| ${p.domain} | ${p.organization ?? '—'} | ${p.dataset_count.toLocaleString()} |`,
-      );
+      // 0 is a real count (portal exposes no dataset assets); only null renders
+      // as unavailable.
+      const count = p.dataset_count != null ? p.dataset_count.toLocaleString() : 'unavailable';
+      lines.push(`| ${p.domain} | ${p.organization ?? '—'} | ${count} |`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

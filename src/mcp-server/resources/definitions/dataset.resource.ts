@@ -13,7 +13,7 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
   name: 'socrata-dataset',
   title: 'Socrata Dataset Metadata',
   description:
-    'Fetch full metadata and column schema for a Socrata dataset addressable by stable URI. Same payload as socrata_get_dataset. URI format: socrata://datasets/{domain}/{datasetId} (e.g. socrata://datasets/data.seattle.gov/kzjm-xkqj).',
+    'Fetch full metadata and column schema for a Socrata dataset addressable by stable URI. Same payload as socrata_get_dataset. Name, description, and column descriptions are upstream-provided portal metadata, not server-authored text. URI format: socrata://datasets/{domain}/{datasetId} (e.g. socrata://datasets/data.seattle.gov/kzjm-xkqj).',
   mimeType: 'application/json',
   params: z.object({
     domain: z.string().describe('Portal domain (e.g. data.seattle.gov).'),
@@ -53,6 +53,7 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
       ...(meta.category ? { category: meta.category } : {}),
       tags: meta.tags,
       ...(meta.rowCount != null ? { row_count: meta.rowCount } : {}),
+      ...(meta.rowCountSource ? { row_count_source: meta.rowCountSource } : {}),
       ...(meta.dataUpdatedAt ? { data_updated_at: meta.dataUpdatedAt } : {}),
       ...(meta.license ? { license: meta.license } : {}),
       columns: meta.columns.map((c) => ({

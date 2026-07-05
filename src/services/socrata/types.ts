@@ -11,6 +11,14 @@ export type DatasetColumn = {
   nonNullCount?: number;
 };
 
+/**
+ * Provenance of a dataset's row count. `top_level_cached_contents` — reported
+ * directly by the views API's top-level `cachedContents`; `column_cached_contents` —
+ * derived as the maximum per-column `cachedContents.count` when the top-level
+ * value is absent.
+ */
+export type RowCountSource = 'top_level_cached_contents' | 'column_cached_contents';
+
 /** Full dataset metadata from the views API. */
 export type DatasetMetadata = {
   datasetId: string;
@@ -20,6 +28,7 @@ export type DatasetMetadata = {
   category?: string;
   tags: string[];
   rowCount?: number;
+  rowCountSource?: RowCountSource;
   dataUpdatedAt?: string;
   license?: string;
   columns: DatasetColumn[];
@@ -39,11 +48,16 @@ export type DiscoveryResult = {
   viewCount?: number;
 };
 
-/** A portal entry from the Discovery API domains endpoint. */
+/**
+ * A known Socrata portal with its live dataset count. `datasetCount` is the
+ * Discovery API's count of dataset-type assets — approximate and point-in-time
+ * (TTL-cached); `0` means the portal genuinely exposes no dataset assets to the
+ * catalog, `null` means the live count is temporarily unavailable.
+ */
 export type PortalEntry = {
   domain: string;
   organization?: string;
-  datasetCount: number;
+  datasetCount: number | null;
 };
 
 /** Options for the Discovery API search. */

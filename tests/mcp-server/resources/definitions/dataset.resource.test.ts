@@ -125,9 +125,32 @@ describe('datasetResource', () => {
       expect(result.description).toBeUndefined();
       expect(result.category).toBeUndefined();
       expect(result.row_count).toBeUndefined();
+      expect(result.row_count_source).toBeUndefined();
       expect(result.data_updated_at).toBeUndefined();
       expect(result.license).toBeUndefined();
       expect(result.columns).toHaveLength(0);
+    });
+
+    it('mirrors a derived row count and its source from the service', async () => {
+      const ctx = createMockContext();
+      mockGetDataset.mockResolvedValue({
+        datasetId: 'ijzp-q8t2',
+        domain: 'data.cityofchicago.org',
+        name: 'Crimes - 2001 to Present',
+        tags: [],
+        rowCount: 8585919,
+        rowCountSource: 'column_cached_contents',
+        columns: [],
+      });
+
+      const params = datasetResource.params.parse({
+        domain: 'data.cityofchicago.org',
+        datasetId: 'ijzp-q8t2',
+      });
+      const result = await datasetResource.handler(params, ctx);
+
+      expect(result.row_count).toBe(8585919);
+      expect(result.row_count_source).toBe('column_cached_contents');
     });
 
     it('maps column optional fields correctly when present', async () => {
