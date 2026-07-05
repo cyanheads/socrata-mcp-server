@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-07-04
+
+DuckDB bundled as a regular dependency, and a refreshed 40-portal catalog with only live Discovery members
+
 ## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-07-04
 
 Real per-portal dataset counts, derived row_count with provenance, and upstream-text framing across tool and resource output
