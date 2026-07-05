@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-07-04
+
+Real per-portal dataset counts, derived row_count with provenance, and upstream-text framing across tool and resource output
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-07-04 · 🛡️ Security
 
 Five bug fixes (SoQL error classification, invalid app-token detection, grouped total_count, DataCanvas reachability, computed-region spillover); mcp-ts-core ^0.10.9 → ^0.10.10; vite/hono/js-yaml security advisories cleared

@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-07-04 19:13:10
+Generated on: 2026-07-05 02:20:34
 
 ```text
 socrata-mcp-server/
@@ -138,13 +138,14 @@ socrata-mcp-server/
 │   │   │       ├── dataset.resource.ts
 │   │   │       └── portals.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── dataframe-describe.tool.ts
-│   │           ├── dataframe-query.tool.ts
-│   │           ├── find-datasets.tool.ts
-│   │           ├── get-dataset.tool.ts
-│   │           ├── list-portals.tool.ts
-│   │           └── query-dataset.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── dataframe-describe.tool.ts
+│   │       │   ├── dataframe-query.tool.ts
+│   │       │   ├── find-datasets.tool.ts
+│   │       │   ├── get-dataset.tool.ts
+│   │       │   ├── list-portals.tool.ts
+│   │       │   └── query-dataset.tool.ts
+│   │       └── upstream-text.ts
 │   ├── services/
 │   │   ├── socrata/
 │   │   │   ├── socrata-service.ts
