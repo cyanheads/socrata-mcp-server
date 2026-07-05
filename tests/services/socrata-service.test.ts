@@ -266,8 +266,8 @@ describe('SocrataService.listPortals portal-count cache', () => {
     const ctx = createMockContext();
     const portals = await svc.listPortals(ctx);
 
-    expect(portals).toHaveLength(36);
-    expect(fetchSpy).toHaveBeenCalledTimes(36);
+    expect(portals).toHaveLength(40);
+    expect(fetchSpy).toHaveBeenCalledTimes(40);
     // Count query is scoped to dataset-type assets, count-only.
     for (const call of fetchSpy.mock.calls) {
       const url = String(call[0]);
@@ -294,17 +294,17 @@ describe('SocrataService.listPortals portal-count cache', () => {
 
     const ctx = createMockContext();
     await svc.listPortals(ctx);
-    expect(fetchSpy).toHaveBeenCalledTimes(36);
+    expect(fetchSpy).toHaveBeenCalledTimes(40);
 
     const again = await svc.listPortals(ctx);
-    expect(fetchSpy).toHaveBeenCalledTimes(36);
+    expect(fetchSpy).toHaveBeenCalledTimes(40);
     expect(again.find((p) => p.domain === 'data.cityofchicago.org')?.datasetCount).toBe(909);
   });
 
   it('degrades a failed domain to datasetCount null without failing the listing', async () => {
     fetchSpy.mockImplementation((input) => {
       const domain = new URL(String(input)).searchParams.get('domains') ?? '';
-      if (domain === 'data.gov') {
+      if (domain === 'data.wa.gov') {
         // Non-SODA-shaped 404 → NotFound → non-transient, fails fast.
         return Promise.resolve(jsonResponse({ error: 'not found' }, 404, 'Not Found'));
       }
@@ -314,8 +314,8 @@ describe('SocrataService.listPortals portal-count cache', () => {
     const ctx = createMockContext();
     const portals = await svc.listPortals(ctx);
 
-    expect(portals).toHaveLength(36);
-    expect(portals.find((p) => p.domain === 'data.gov')?.datasetCount).toBeNull();
+    expect(portals).toHaveLength(40);
+    expect(portals.find((p) => p.domain === 'data.wa.gov')?.datasetCount).toBeNull();
     expect(portals.find((p) => p.domain === 'data.cityofchicago.org')?.datasetCount).toBe(909);
   });
 });

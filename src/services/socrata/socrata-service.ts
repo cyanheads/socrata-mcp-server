@@ -34,44 +34,59 @@ const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
  * The Discovery API no longer exposes a /domains listing endpoint (returns 404),
  * so membership is static; per-portal dataset counts are fetched live from the
  * catalog endpoint and TTL-cached (see the portal-count cache below).
+ *
+ * Every domain is a live Discovery-catalog member — verified 2026-07-04 via
+ * `?domains=<domain>&only=dataset&limit=0` returning 200 with a resultSetSize.
+ * A zero count is honest signal (the portal exposes no dataset-type assets to
+ * the catalog), not a dead portal; re-verify with the same probe before
+ * changing membership.
  */
 const KNOWN_PORTALS: ReadonlyArray<Omit<PortalEntry, 'datasetCount'>> = [
+  // Cities
   { domain: 'data.cityofnewyork.us', organization: 'City of New York' },
-  { domain: 'data.seattle.gov', organization: 'City of Seattle' },
   { domain: 'data.cityofchicago.org', organization: 'City of Chicago' },
-  { domain: 'data.sfgov.org', organization: 'City and County of San Francisco' },
   { domain: 'data.lacity.org', organization: 'City of Los Angeles' },
-  { domain: 'data.boston.gov', organization: 'City of Boston' },
+  { domain: 'www.dallasopendata.com', organization: 'City of Dallas' },
+  { domain: 'data.sfgov.org', organization: 'City and County of San Francisco' },
+  { domain: 'data.seattle.gov', organization: 'City of Seattle' },
   { domain: 'data.austintexas.gov', organization: 'City of Austin, TX' },
-  { domain: 'data.baltimorecity.gov', organization: 'City of Baltimore' },
-  { domain: 'data.nashville.gov', organization: 'City of Nashville' },
-  { domain: 'data.detroitmi.gov', organization: 'City of Detroit' },
-  { domain: 'data.cityofmadison.com', organization: 'City of Madison, WI' },
-  { domain: 'data.colorado.gov', organization: 'State of Colorado' },
+  { domain: 'data.oaklandca.gov', organization: 'City of Oakland' },
+  { domain: 'data.nola.gov', organization: 'City of New Orleans' },
+  { domain: 'data.kcmo.org', organization: 'City of Kansas City, MO' },
+  { domain: 'data.cincinnati-oh.gov', organization: 'City of Cincinnati' },
+  { domain: 'data.honolulu.gov', organization: 'City and County of Honolulu' },
+  { domain: 'data.cambridgema.gov', organization: 'City of Cambridge, MA' },
+  { domain: 'data.providenceri.gov', organization: 'City of Providence, RI' },
+  { domain: 'data.brla.gov', organization: 'City of Baton Rouge, LA' },
+  { domain: 'data.norfolk.gov', organization: 'City of Norfolk, VA' },
+  { domain: 'data.mesaaz.gov', organization: 'City of Mesa, AZ' },
+  // States
   { domain: 'data.ny.gov', organization: 'State of New York' },
   { domain: 'data.texas.gov', organization: 'State of Texas' },
   { domain: 'data.wa.gov', organization: 'State of Washington' },
+  { domain: 'data.colorado.gov', organization: 'State of Colorado' },
   { domain: 'data.oregon.gov', organization: 'State of Oregon' },
-  { domain: 'data.illinois.gov', organization: 'State of Illinois' },
-  { domain: 'data.maryland.gov', organization: 'State of Maryland' },
-  { domain: 'data.michigan.gov', organization: 'State of Michigan' },
-  { domain: 'data.ohio.gov', organization: 'State of Ohio' },
   { domain: 'data.ct.gov', organization: 'State of Connecticut' },
+  { domain: 'data.illinois.gov', organization: 'State of Illinois' },
   { domain: 'data.iowa.gov', organization: 'State of Iowa' },
-  { domain: 'data.hawaii.gov', organization: 'State of Hawaii' },
-  { domain: 'data.kcmo.org', organization: 'City of Kansas City, MO' },
+  { domain: 'data.michigan.gov', organization: 'State of Michigan' },
+  { domain: 'opendata.maryland.gov', organization: 'State of Maryland' },
+  { domain: 'data.pa.gov', organization: 'Commonwealth of Pennsylvania' },
+  { domain: 'data.nj.gov', organization: 'State of New Jersey' },
+  { domain: 'data.delaware.gov', organization: 'State of Delaware' },
+  { domain: 'data.vermont.gov', organization: 'State of Vermont' },
+  { domain: 'data.mo.gov', organization: 'State of Missouri' },
+  // Counties
+  { domain: 'data.kingcounty.gov', organization: 'King County, WA' },
+  { domain: 'datacatalog.cookcountyil.gov', organization: 'Cook County, IL' },
   { domain: 'data.montgomerycountymd.gov', organization: 'Montgomery County, MD' },
-  { domain: 'opendata.dc.gov', organization: 'District of Columbia' },
-  { domain: 'data.gov', organization: 'U.S. Federal Government (data.gov)' },
+  { domain: 'data.sccgov.org', organization: 'County of Santa Clara, CA' },
+  // Federal agencies
   { domain: 'data.cdc.gov', organization: 'Centers for Disease Control and Prevention' },
-  { domain: 'data.hhs.gov', organization: 'U.S. Dept. of Health and Human Services' },
-  { domain: 'data.cityofsacramento.org', organization: 'City of Sacramento' },
-  { domain: 'data.sandiego.gov', organization: 'City of San Diego' },
-  { domain: 'data.mesaaz.gov', organization: 'City of Mesa, AZ' },
-  { domain: 'data.tucsonaz.gov', organization: 'City of Tucson, AZ' },
-  { domain: 'data.opendatasoft.com', organization: 'OpenDataSoft' },
-  { domain: 'opendata.minneapolismn.gov', organization: 'City of Minneapolis' },
-  { domain: 'data.cityoflewisville.com', organization: 'City of Lewisville, TX' },
+  { domain: 'data.energystar.gov', organization: 'U.S. EPA ENERGY STAR' },
+  // Canada
+  { domain: 'data.edmonton.ca', organization: 'City of Edmonton' },
+  { domain: 'data.calgary.ca', organization: 'City of Calgary' },
 ];
 
 /** How long a successful portal-count refresh stays fresh. */

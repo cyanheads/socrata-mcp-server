@@ -39,7 +39,7 @@ api_docs: https://dev.socrata.com/docs/endpoints
 
 ## Overview
 
-Wraps the [Socrata SODA API](https://dev.socrata.com/) to expose any of 200+ government open-data portals to LLMs. Portals share a common API surface (SODA 2.1 + the Discovery API), so one server covers city, county, state, and federal datasets — Seattle, Chicago, New York, HHS, data.gov, and more.
+Wraps the [Socrata SODA API](https://dev.socrata.com/) to expose any of 200+ government open-data portals to LLMs. Portals share a common API surface (SODA 2.1 + the Discovery API), so one server covers city, county, state, and federal datasets — Seattle, Chicago, New York, the CDC, and more.
 
 Core challenge: 10K+ datasets with heterogeneous schemas, spread across independent portals. The server provides a discovery-first workflow — find the portal and dataset, inspect the schema, then query — rather than hardcoding knowledge about any specific dataset.
 
@@ -76,7 +76,7 @@ Target users: civic developers, journalists, researchers, urban planners, and an
 |:--------|:---------|:--------|:------------|
 | `SOCRATA_APP_TOKEN` | No | — | Socrata app token. Free to register at any portal. Without token, requests draw from a shared throttled pool per source IP. |
 | `SOCRATA_DEFAULT_DOMAIN` | No | `data.seattle.gov` | Default portal domain when `domain` is omitted from tool calls. |
-| `CANVAS_PROVIDER_TYPE` | No | `none` | Set to `duckdb` to enable DataCanvas spillover for large query results. Requires `@duckdb/node-api` peer dependency. |
+| `CANVAS_PROVIDER_TYPE` | No | `none` | Set to `duckdb` to enable DataCanvas spillover for large query results. `@duckdb/node-api` ships as a regular dependency, so the env var alone enables it — no extra install. |
 
 ---
 

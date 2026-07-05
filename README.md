@@ -40,7 +40,7 @@ Six tools covering the full Socrata workflow — portal discovery, dataset searc
 
 List known Socrata-powered government open-data portals.
 
-- Curated catalog of 36 well-known city, county, state, and federal portals
+- Curated catalog of 40 well-known city, county, state, and federal portals — every member verified live in the Discovery catalog
 - Per-portal dataset counts fetched live from the Discovery API, cached ~24 hours — approximate, point-in-time (`0` means the portal exposes no dataset assets to the catalog; `null` means the count is temporarily unavailable)
 - Client-side substring filtering on domain or organization name
 - Pagination (up to 200 per page) with offset
@@ -110,7 +110,7 @@ Run SELECT-only SQL against DataCanvas tables populated by `socrata_query_datase
 - DuckDB infers types from spilled data — numeric columns that SODA returned as strings become queryable with numeric comparisons (`year > 2020`, `amount < 500`)
 - SELECT-only enforcement: DDL, DML, and file-reading functions (`read_csv`, `read_parquet`) are rejected
 - Up to 10,000 rows per call
-- Only works when `CANVAS_PROVIDER_TYPE=duckdb` is set
+- Works out of the box when `CANVAS_PROVIDER_TYPE=duckdb` is set — DuckDB ships as a regular dependency
 
 ## Resources and prompts
 
@@ -132,12 +132,12 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 - Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
 - Structured logging with optional OpenTelemetry tracing
 - STDIO and Streamable HTTP transports
-- Optional DataCanvas (DuckDB) for analytical SQL over large result sets
+- Optional DataCanvas (DuckDB, bundled) for analytical SQL over large result sets
 
 Socrata-specific:
 
 - Full Socrata SODA 2.1 API integration — SoQL query builder with select, where, group, having, order, search, limit, offset
-- Discovery API for cross-portal dataset search and per-portal dataset counts (curated 36-portal catalog, counts cached ~24h)
+- Discovery API for cross-portal dataset search and per-portal dataset counts (curated 40-portal catalog, counts cached ~24h)
 - App token support (`SOCRATA_APP_TOKEN`) for higher per-IP rate limits
 - Configurable default portal domain via `SOCRATA_DEFAULT_DOMAIN`
 - Computed region column filtering to reduce noise in wide datasets
@@ -257,7 +257,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424): `debug`, `info`, `notice`, `warning`, `error`. | `info` |
-| `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas spillover for large result sets. | — |
+| `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas spillover for large result sets. DuckDB ships with the server — no additional install required. | — |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
