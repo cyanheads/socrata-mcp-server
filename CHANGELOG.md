@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-10
+
+Full content[] rendering (#19), bounded paginated canvas spillover (#20), and sql_rejected contract parity (#22); mcp-ts-core ^0.10.14, supply-chain hardening
+
 ## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-07-04
 
 DuckDB bundled as a regular dependency, and a refreshed 40-portal catalog with only live Discovery members
