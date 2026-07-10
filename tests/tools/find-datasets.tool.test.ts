@@ -172,4 +172,24 @@ describe('findDatasets', () => {
     const blocks = findDatasets.format!(output);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
   });
+
+  it('format renders every column name — no 8-column render cap (#19)', () => {
+    const columnNames = Array.from({ length: 12 }, (_, i) => `col_${i}`);
+    const output = {
+      results: [
+        {
+          dataset_id: 'kzjm-xkqj',
+          domain: 'data.seattle.gov',
+          name: 'Wide Dataset',
+          tags: [],
+          column_names: columnNames,
+        },
+      ],
+    };
+    const blocks = findDatasets.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    // All 12 columns render; no "(+N more)" summary marker replaces the tail.
+    for (const c of columnNames) expect(text).toContain(c);
+    expect(text).not.toMatch(/\+\d+ more/);
+  });
 });

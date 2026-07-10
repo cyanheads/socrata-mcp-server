@@ -512,7 +512,7 @@ describe('empty result sets and pagination', () => {
 // ---------------------------------------------------------------------------
 
 describe('format() — oversized and edge-case payloads', () => {
-  it('queryDataset format handles >50 rows by truncating with "more rows" indicator', () => {
+  it('queryDataset format renders every row — no render-only truncation (#19 parity)', () => {
     const rows = Array.from({ length: 60 }, (_, i) => ({ id: String(i), val: 'x' }));
     const output = {
       rows,
@@ -523,10 +523,12 @@ describe('format() — oversized and edge-case payloads', () => {
     };
     const blocks = queryDataset.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
-    expect(text).toContain('more rows');
+    // content[] carries every row structuredContent does — no "more rows" summary.
+    expect(text).not.toMatch(/more rows/);
+    expect(text.split('\n').filter((l) => /^\| \d+ \| x \|$/.test(l))).toHaveLength(60);
   });
 
-  it('queryDataset format handles >20 rows in wide dataset (JSON fallback, >20 rows truncated)', () => {
+  it('queryDataset format renders every row in the wide JSON fallback (#19 parity)', () => {
     const cols = Array.from({ length: 12 }, (_, i) => `col${i}`);
     const rows = Array.from({ length: 25 }, (_, r) =>
       Object.fromEntries(cols.map((c, i) => [c, `val${r}_${i}`])),
@@ -540,9 +542,10 @@ describe('format() — oversized and edge-case payloads', () => {
     };
     const blocks = queryDataset.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
-    // Wide result (>10 cols) falls back to JSON.
+    // Wide result (>10 cols) falls back to JSON — one fence per row, all rendered.
     expect(text).toContain('```json');
-    expect(text).toContain('more rows');
+    expect(text).not.toMatch(/more rows/);
+    expect((text.match(/```json/g) ?? []).length).toBe(25);
   });
 
   it('getDataset format renders non_null_count when present', () => {
@@ -574,7 +577,7 @@ describe('format() — oversized and edge-case payloads', () => {
     expect(text).not.toContain('| A|B|C values |');
   });
 
-  it('findDatasets format truncates column_names preview to 8 columns', () => {
+  it('findDatasets format renders the full column_names list — no 8-column cap (#19 parity)', () => {
     const output = {
       results: [
         {
@@ -588,8 +591,9 @@ describe('format() — oversized and edge-case payloads', () => {
     };
     const blocks = findDatasets.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
-    // 10 columns — should show 8 + "(+2 more)" indicator.
-    expect(text).toContain('+2 more');
+    // All 10 columns render; no "(+N more)" summary marker replaces the tail.
+    expect(text).toContain('a, b, c, d, e, f, g, h, i, j');
+    expect(text).not.toMatch(/\+\d+ more/);
   });
 
   it('findDatasets format includes view_count and license when present', () => {

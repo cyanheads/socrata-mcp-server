@@ -21,11 +21,21 @@ vi.mock('@/config/server-config.js', () => ({
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const mockQueryDataset = vi.fn();
-const mockService = { queryDataset: mockQueryDataset };
+const mockStreamDatasetRows = vi.fn();
+const mockService = { queryDataset: mockQueryDataset, streamDatasetRows: mockStreamDatasetRows };
+
+/** Build a fresh async generator over the given rows — mirrors streamDatasetRows. */
+function streamOf(rows: Record<string, unknown>[]) {
+  return (async function* () {
+    for (const r of rows) yield r;
+  })();
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(mockService);
+  // Default: nothing to stream unless a canvas test supplies paginated rows.
+  mockStreamDatasetRows.mockImplementation(() => streamOf([]));
 });
 
 afterEach(() => {
@@ -105,7 +115,7 @@ describe('queryDataset', () => {
     expect(String(enrichment.notice)).not.toContain('total_count');
   });
 
-  it('strips Socrata system columns from the canvas projection but keeps them in rows', async () => {
+  it('strips Socrata system columns from the canvas projection but keeps them in inline rows', async () => {
     const ctx = createMockContext({ errors: queryDataset.errors });
     // Sparse SODA shape: system keys appear on some rows only.
     const rows = Array.from({ length: 5 }, (_, i) => ({
@@ -113,8 +123,10 @@ describe('queryDataset', () => {
       primary_type: 'THEFT',
       ...(i % 2 === 0 ? { ':@computed_region_awaf_s7ux': String(40 + i) } : {}),
     }));
+    // Inline page keeps system columns; the paginated drain feeds the canvas.
     mockQueryDataset.mockResolvedValue({ rows, rowCount: 5, assembledQuery: '$limit=5' });
-    const registerTable = vi.fn().mockResolvedValue({ name: 'ijzp_q8t2_rows', rowCount: 5 });
+    mockStreamDatasetRows.mockImplementation(() => streamOf(rows));
+    const registerTable = vi.fn().mockResolvedValue({ tableName: 'ijzp_q8t2_rows', rowCount: 5 });
     const mockCanvas = {
       acquire: vi.fn().mockResolvedValue({ canvasId: 'abc1234567', registerTable }),
     };
@@ -134,6 +146,62 @@ describe('queryDataset', () => {
     // Inline rows keep every column, system keys included.
     expect(result.rows[0]).toHaveProperty(':@computed_region_awaf_s7ux');
     expect(result.canvas_id).toBe('abc1234567');
+    expect(result.canvas_row_count).toBe(5);
+  });
+
+  it('stages the full paginated set on the canvas, not just the inline page', async () => {
+    const ctx = createMockContext({ errors: queryDataset.errors });
+    // Inline page: exactly the caller's limit (triggers spill), with a large total.
+    mockQueryDataset.mockResolvedValue({
+      rows: Array.from({ length: 5 }, (_, i) => ({ id: String(i) })),
+      rowCount: 5,
+      totalCount: 2183186,
+      assembledQuery: '$limit=5',
+    });
+    // The paginated drain walks past one page — 12 rows, more than the inline 5.
+    const paged = Array.from({ length: 12 }, (_, i) => ({ id: String(i) }));
+    mockStreamDatasetRows.mockImplementation(() => streamOf(paged));
+    const registerTable = vi.fn().mockResolvedValue({ tableName: 'abcd_1234_rows', rowCount: 12 });
+    setCanvas({
+      acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas1234', registerTable }),
+    } as unknown as DataCanvas);
+
+    const input = queryDataset.input.parse({ dataset_id: 'abcd-1234', limit: 5, offset: 0 });
+    const result = await queryDataset.handler(input, ctx);
+
+    // Canvas holds the paginated set (12), not the 5-row inline page.
+    expect(registerTable).toHaveBeenCalledTimes(1);
+    const staged = registerTable.mock.calls[0]?.[1] as unknown[];
+    expect(staged).toHaveLength(12);
+    expect(result.canvas_row_count).toBe(12);
+    // Inline rows stay bounded by the caller's limit.
+    expect(result.rows).toHaveLength(5);
+    // The drain was asked to fetch up to the safety cap, scoped to the same dataset.
+    expect(mockStreamDatasetRows).toHaveBeenCalledTimes(1);
+    const [streamOpts, maxRows] = mockStreamDatasetRows.mock.calls[0] as [
+      Record<string, unknown>,
+      number,
+    ];
+    expect(maxRows).toBe(50_000);
+    expect(streamOpts).toMatchObject({ datasetId: 'abcd-1234' });
+  });
+
+  it('format renders every row — no render-only cap beyond the caller limit (#19)', () => {
+    const rows = Array.from({ length: 60 }, (_, i) => ({ id: String(i), type: 'X' }));
+    const output = {
+      rows,
+      row_count: 60,
+      assembled_query: '$limit=60',
+      domain: 'data.seattle.gov',
+      dataset_id: 'kzjm-xkqj',
+    };
+    const blocks = queryDataset.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    // The 60th row is rendered and there is no "N more rows" summary marker.
+    expect(text).toContain('| 59 | X |');
+    expect(text).not.toMatch(/more rows/);
+    const dataRows = text.split('\n').filter((l) => /^\| \d+ \| X \|$/.test(l));
+    expect(dataRows).toHaveLength(60);
   });
 
   it('re-throws a service soql_error with the declared recovery hint attached', async () => {

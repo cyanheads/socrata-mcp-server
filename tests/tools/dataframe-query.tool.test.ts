@@ -116,6 +116,145 @@ describe('dataframeQuery', () => {
     await expect(dataframeQuery.handler(input, ctx)).rejects.toThrow('Unexpected internal failure');
   });
 
+  /** Wire a canvas whose acquired instance.query() rejects with the given error. */
+  function canvasWhereQueryRejects(err: unknown): DataCanvas {
+    return {
+      acquire: vi.fn().mockResolvedValue({ query: vi.fn().mockRejectedValue(err) }),
+    } as unknown as DataCanvas;
+  }
+
+  it('re-throws a non-SELECT SQL-gate rejection as sql_rejected with a recovery hint (#22)', async () => {
+    // Exactly the repro: the gate throws before DuckDB executes, ValidationError
+    // with data.reason: 'non_select_statement' and no recovery hint.
+    setCanvas(
+      canvasWhereQueryRejects(
+        new McpError(
+          JsonRpcErrorCode.ValidationError,
+          'Canvas query must be SELECT; got DELETE. Mutations must use registerTable, drop, or clear.',
+          { reason: 'non_select_statement', statementType: 'DELETE' },
+        ),
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'abc1234567',
+      sql: 'DELETE FROM kzjm_xkqj_rows',
+    });
+
+    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'sql_rejected',
+        // The original gate reason is preserved as diagnostic context, not clobbered.
+        gateReason: 'non_select_statement',
+        statementType: 'DELETE',
+        recovery: { hint: expect.stringContaining('SELECT') },
+      },
+    });
+  });
+
+  it('maps other SQL-gate rejections (system_catalog_access) to sql_rejected too (#22)', async () => {
+    setCanvas(
+      canvasWhereQueryRejects(
+        new McpError(
+          JsonRpcErrorCode.ValidationError,
+          'Canvas query references a system catalog: information_schema.',
+          { reason: 'system_catalog_access', catalog: 'information_schema' },
+        ),
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'abc1234567',
+      sql: 'SELECT * FROM information_schema.tables',
+    });
+
+    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'sql_rejected',
+        gateReason: 'system_catalog_access',
+        catalog: 'information_schema',
+        recovery: { hint: expect.stringContaining('SELECT') },
+      },
+    });
+  });
+
+  it('passes invalid_sql through unchanged — a SELECT typo is not a gate rejection (#22)', async () => {
+    setCanvas(
+      canvasWhereQueryRejects(
+        new McpError(
+          JsonRpcErrorCode.ValidationError,
+          'Canvas query failed to prepare: Referenced column "nope" not found.',
+          { reason: 'invalid_sql', binderMessage: 'Referenced column "nope" not found' },
+        ),
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'abc1234567',
+      sql: 'SELECT nope FROM t',
+    });
+
+    // Stays invalid_sql — not remapped to sql_rejected.
+    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_sql' },
+    });
+  });
+
+  it('re-throws a missing_table NotFound as table_not_found with a recovery hint (#22)', async () => {
+    setCanvas(
+      canvasWhereQueryRejects(
+        new McpError(
+          JsonRpcErrorCode.NotFound,
+          'Canvas table "kzjm_xkqj_rows" does not exist. Re-stage it or call describe().',
+          { reason: 'missing_table', tableName: 'kzjm_xkqj_rows' },
+        ),
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    const input = dataframeQuery.input.parse({
+      canvas_id: 'abc1234567',
+      sql: 'SELECT * FROM kzjm_xkqj_rows',
+    });
+
+    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'table_not_found',
+        recovery: { hint: expect.stringContaining('socrata_dataframe_describe') },
+      },
+    });
+  });
+
+  it('format renders every row in table mode — no 50-row render cap (#19)', () => {
+    const rows = Array.from({ length: 60 }, (_, i) => ({ id: i, type: 'X' }));
+    const output = { rows, row_count: 60, sql: 'SELECT id, type FROM t', canvas_id: 'abc1234567' };
+    const blocks = dataframeQuery.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    expect(text).toContain('| 59 | X |');
+    expect(text).not.toMatch(/more rows/);
+    const dataRows = text.split('\n').filter((l) => /^\| \d+ \| X \|$/.test(l));
+    expect(dataRows).toHaveLength(60);
+  });
+
+  it('format renders every row in wide JSON mode — no 20-row render cap (#19)', () => {
+    const cols = Array.from({ length: 15 }, (_, i) => `col${i}`);
+    const rows = Array.from({ length: 25 }, (_, r) =>
+      Object.fromEntries(cols.map((c, i) => [c, `v${r}_${i}`])),
+    );
+    const output = {
+      rows,
+      row_count: 25,
+      sql: 'SELECT * FROM wide_table',
+      canvas_id: 'xyz9876543',
+    };
+    const blocks = dataframeQuery.format!(output);
+    const text = (blocks[0] as { text?: string }).text ?? '';
+    expect(text).not.toMatch(/more rows/);
+    expect(text).toContain('v24_0'); // last row's marker value is present
+    expect((text.match(/```json/g) ?? []).length).toBe(25);
+  });
+
   it('formats wide result set as JSON blocks', () => {
     const cols = Array.from({ length: 15 }, (_, i) => `col${i}`);
     const rows = Array.from({ length: 5 }, (_, r) =>

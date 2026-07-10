@@ -5,10 +5,29 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { type DataCanvas, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
+
+/**
+ * DuckDB read-only SQL-gate rejection reasons that map to this tool's declared
+ * `sql_rejected` contract. The gate (in `@cyanheads/mcp-ts-core`'s DuckdbProvider)
+ * throws these as plain `ValidationError`s with `data.reason` set but no recovery
+ * hint — it is a framework-internal validator with no access to this tool's
+ * contract — so the handler re-throws them via `ctx.fail('sql_rejected', …)`.
+ * `invalid_sql` (a SELECT that parses but fails to prepare — a column/function
+ * typo) and `missing_table` (a NotFound, handled separately) are deliberately
+ * excluded: they are distinct failure surfaces that bubble on their own reasons.
+ */
+const SQL_GATE_REJECTION_REASONS: ReadonlySet<string> = new Set([
+  SQL_GATE_REASONS.nonSelectStatement,
+  SQL_GATE_REASONS.multiStatement,
+  SQL_GATE_REASONS.systemCatalogAccess,
+  SQL_GATE_REASONS.deniedFunction,
+  SQL_GATE_REASONS.deniedFunctionInPlan,
+  SQL_GATE_REASONS.planOperatorNotAllowed,
+]);
 
 export const dataframeQuery = tool('socrata_dataframe_query', {
   title: 'Query DataCanvas Table',
@@ -73,6 +92,13 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
         'Canvas tokens expire after inactivity and cannot be listed. Re-run socrata_query_dataset to stage a fresh canvas and pass the canvas_id it returns.',
     },
     {
+      reason: 'table_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The SQL referenced a canvas table that does not exist — expired, dropped, or a mistyped name.',
+      recovery:
+        'List staged tables and their schemas with socrata_dataframe_describe, or re-run socrata_query_dataset to re-stage the data, then reference the exact table name.',
+    },
+    {
       reason: 'sql_rejected',
       code: JsonRpcErrorCode.ValidationError,
       when: 'SQL was not a SELECT statement, referenced a system catalog, or contained disallowed functions.',
@@ -108,11 +134,41 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       }
       throw err;
     }
-    const result = await instance.query(input.sql, {
-      rowLimit: input.limit,
-      denySystemCatalogs: true,
-      signal: ctx.signal,
-    });
+    let result: Awaited<ReturnType<typeof instance.query>>;
+    try {
+      result = await instance.query(input.sql, {
+        rowLimit: input.limit,
+        denySystemCatalogs: true,
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      // The read-only SQL gate rejects before any DuckDB execution and throws a
+      // plain ValidationError/NotFound carrying data.reason but no recovery hint.
+      // Re-throw gate rejections and missing-table errors through this tool's
+      // declared contract so the recovery hint reaches the wire (mirrors the
+      // canvas_not_found rewrap at the acquire() call above).
+      if (err instanceof McpError) {
+        const data = (err.data ?? {}) as Record<string, unknown>;
+        const reason = data.reason;
+        if (typeof reason === 'string' && SQL_GATE_REJECTION_REASONS.has(reason)) {
+          // ctx.fail writes data.reason='sql_rejected' last, so a bare {...data}
+          // spread would clobber the gate's own reason under the same key — lift
+          // it out first and preserve it as gateReason diagnostic context.
+          const { reason: gateReason, ...rest } = data;
+          throw ctx.fail('sql_rejected', err.message, {
+            ...rest,
+            gateReason,
+            ...ctx.recoveryFor('sql_rejected'),
+          });
+        }
+        if (err.code === JsonRpcErrorCode.NotFound && reason === 'missing_table') {
+          throw ctx.fail('table_not_found', err.message, {
+            ...ctx.recoveryFor('table_not_found'),
+          });
+        }
+      }
+      throw err;
+    }
 
     if (result.rows.length === 0) {
       ctx.enrich.notice(
@@ -149,24 +205,21 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     const firstRow = result.rows[0];
     const cols = Object.keys(firstRow ?? {});
 
+    // Render every row structuredContent carries — result.rows is already bounded
+    // by the caller's `limit`, so a second render-only cap here would silently
+    // drop rows from content[] that structuredContent-reading clients still see.
     if (cols.length > 0 && cols.length <= 10) {
       lines.push(`| ${cols.map((c) => escapeTableCell(c)).join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
-      for (const row of result.rows.slice(0, 50)) {
+      for (const row of result.rows) {
         const cells = cols.map((c) =>
           escapeTableCell(String((row as Record<string, unknown>)[c] ?? '')),
         );
         lines.push(`| ${cells.join(' | ')} |`);
       }
-      if (result.rows.length > 50) {
-        lines.push(`\n_... and ${result.rows.length - 50} more rows_`);
-      }
     } else {
-      for (const row of result.rows.slice(0, 20)) {
+      for (const row of result.rows) {
         lines.push(...fencedJson(JSON.stringify(row)));
-      }
-      if (result.rows.length > 20) {
-        lines.push(`\n_... and ${result.rows.length - 20} more rows_`);
       }
     }
 

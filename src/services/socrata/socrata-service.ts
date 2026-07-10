@@ -29,6 +29,9 @@ import { DATASET_ID_PATTERN } from './types.js';
 /** Discovery API base URL (cross-portal). */
 const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
 
+/** SODA `$limit` ceiling per request — the paginated canvas drain fetches pages this size. */
+const SODA_PAGE_MAX = 5000;
+
 /**
  * Curated list of well-known Socrata portals.
  * The Discovery API no longer exposes a /domains listing endpoint (returns 404),
@@ -392,6 +395,28 @@ export class SocrataService {
     };
   }
 
+  /**
+   * Assemble the SoQL query-string params shared by the single-page
+   * ({@link queryDataset}) and paginated ({@link streamDatasetRows}) fetch paths.
+   * `$limit`/`$offset` are passed explicitly so each caller controls paging.
+   */
+  private buildQueryParams(
+    opts: QueryDatasetOptions,
+    limit: number,
+    offset: number,
+  ): URLSearchParams {
+    const params = new URLSearchParams();
+    if (opts.select) params.set('$select', opts.select);
+    if (opts.search) params.set('$q', opts.search);
+    if (opts.where) params.set('$where', opts.where);
+    if (opts.group) params.set('$group', opts.group);
+    if (opts.having) params.set('$having', opts.having);
+    if (opts.order) params.set('$order', opts.order);
+    params.set('$limit', String(limit));
+    if (offset) params.set('$offset', String(offset));
+    return params;
+  }
+
   /** Execute a SoQL query against a dataset. */
   async queryDataset(opts: QueryDatasetOptions, ctx: Context): Promise<QueryResult> {
     if (!DATASET_ID_PATTERN.test(opts.datasetId)) {
@@ -402,16 +427,7 @@ export class SocrataService {
     }
 
     const limit = Math.min(opts.limit ?? 100, 5000);
-    const params = new URLSearchParams();
-
-    if (opts.select) params.set('$select', opts.select);
-    if (opts.search) params.set('$q', opts.search);
-    if (opts.where) params.set('$where', opts.where);
-    if (opts.group) params.set('$group', opts.group);
-    if (opts.having) params.set('$having', opts.having);
-    if (opts.order) params.set('$order', opts.order);
-    params.set('$limit', String(limit));
-    if (opts.offset) params.set('$offset', String(opts.offset));
+    const params = this.buildQueryParams(opts, limit, opts.offset ?? 0);
 
     const dataUrl = `https://${opts.domain}/resource/${opts.datasetId}.json?${params.toString()}`;
     ctx.log.debug('SoQL query', { domain: opts.domain, datasetId: opts.datasetId });
@@ -452,6 +468,52 @@ export class SocrataService {
           ? [...clauses, `$limit=${limit}`].join(' ')
           : '(default — all columns, up to limit)',
     };
+  }
+
+  /**
+   * Stream a dataset's matching rows across paginated SODA calls, bounded by a
+   * hard `maxRows` safety cap. Walks `$offset` in pages of {@link SODA_PAGE_MAX}
+   * until the upstream is exhausted (a short page) or the cap is reached.
+   *
+   * Distinct from {@link queryDataset}, whose single call bounds the inline
+   * response by the caller's `limit`: this drains the wider matching set (up to
+   * the cap) so a bounded copy can be staged onto a DataCanvas for SQL — the
+   * canvas is a bounded subset, never literally the full result set when the
+   * match exceeds the cap.
+   */
+  async *streamDatasetRows(
+    opts: QueryDatasetOptions,
+    maxRows: number,
+    ctx: Context,
+  ): AsyncGenerator<Record<string, unknown>> {
+    if (!DATASET_ID_PATTERN.test(opts.datasetId)) {
+      throw validationError(
+        `Invalid dataset ID format: "${opts.datasetId}". Expected pattern like kzjm-xkqj.`,
+        { reason: 'invalid_id', datasetId: opts.datasetId },
+      );
+    }
+
+    let offset = opts.offset ?? 0;
+    let yielded = 0;
+    while (yielded < maxRows) {
+      const pageLimit = Math.min(SODA_PAGE_MAX, maxRows - yielded);
+      const params = this.buildQueryParams(opts, pageLimit, offset);
+      const url = `https://${opts.domain}/resource/${opts.datasetId}.json?${params.toString()}`;
+      ctx.log.debug('SoQL spill page', {
+        domain: opts.domain,
+        datasetId: opts.datasetId,
+        offset,
+        pageLimit,
+      });
+
+      const page = await this.fetchJson<Record<string, unknown>[]>(url, ctx);
+      for (const row of page) yield row;
+      yielded += page.length;
+
+      // A short page means the upstream is exhausted — stop before an empty fetch.
+      if (page.length < pageLimit) break;
+      offset += page.length;
+    }
   }
 
   /**

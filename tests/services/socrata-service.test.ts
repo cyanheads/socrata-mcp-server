@@ -483,3 +483,85 @@ describe('SocrataService.getDataset row-count derivation', () => {
     expect(meta.columns[0]?.nonNullCount).toBeUndefined();
   });
 });
+
+describe('SocrataService.streamDatasetRows pagination', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  async function drain(gen: AsyncGenerator<Record<string, unknown>>) {
+    const rows: Record<string, unknown>[] = [];
+    for await (const row of gen) rows.push(row);
+    return rows;
+  }
+
+  it('walks $offset across pages until a short page signals exhaustion', async () => {
+    // A full first page (5000 = the SODA per-request ceiling) forces a second
+    // request; the short second page ends the walk before an empty fetch.
+    const page1 = Array.from({ length: 5000 }, (_, i) => ({ id: String(i) }));
+    const page2 = Array.from({ length: 10 }, (_, i) => ({ id: String(5000 + i) }));
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse(page1, 200, 'OK'))
+      .mockResolvedValueOnce(jsonResponse(page2, 200, 'OK'));
+
+    const ctx = createMockContext();
+    const rows = await drain(
+      svc.streamDatasetRows(
+        { domain: 'data.seattle.gov', datasetId: 'kzjm-xkqj', where: "type = 'X'" },
+        50_000,
+        ctx,
+      ),
+    );
+
+    // Canvas would stage all 5010 rows — more than a single page's worth.
+    expect(rows).toHaveLength(5010);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const url1 = decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0])).replaceAll('+', ' ');
+    const url2 = decodeURIComponent(String(fetchSpy.mock.calls[1]?.[0])).replaceAll('+', ' ');
+    // First page from offset 0 (no $offset), second continues at 5000.
+    expect(url1).toContain('$limit=5000');
+    expect(url1).not.toContain('$offset');
+    expect(url2).toContain('$offset=5000');
+    // The shared where-clause rides every page.
+    expect(url1).toContain("$where=type = 'X'");
+    expect(url2).toContain("$where=type = 'X'");
+  });
+
+  it('clamps the page $limit to the remaining cap and stops at maxRows', async () => {
+    // maxRows below the page ceiling — the request must ask for exactly maxRows,
+    // and a full page at the cap ends the walk without a second fetch.
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(
+        Array.from({ length: 3 }, (_, i) => ({ id: String(i) })),
+        200,
+        'OK',
+      ),
+    );
+
+    const ctx = createMockContext();
+    const rows = await drain(
+      svc.streamDatasetRows({ domain: 'data.seattle.gov', datasetId: 'kzjm-xkqj' }, 3, ctx),
+    );
+
+    expect(rows).toHaveLength(3);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0]))).toContain('$limit=3');
+  });
+
+  it('throws invalid_id before any fetch for a malformed dataset id', async () => {
+    const ctx = createMockContext();
+    await expect(
+      drain(svc.streamDatasetRows({ domain: 'data.seattle.gov', datasetId: 'bad!!' }, 100, ctx)),
+    ).rejects.toMatchObject({ data: { reason: 'invalid_id' } });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

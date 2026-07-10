@@ -181,10 +181,10 @@ Key column fields from the `api/views/{id}.json` response: `fieldName`, `dataTyp
 | `offset` | `number?` | Row offset for pagination. |
 | `canvas_id` | `string?` | DataCanvas token. When `CANVAS_PROVIDER_TYPE=duckdb`, results spill to canvas when rows exceed preview size. Omit to mint new canvas. |
 
-**Output:** `{ rows: [object], rowCount, totalCount?, assembledQuery, domain, dataset_id, canvas_id? }`.
+**Output:** `{ rows: [object], rowCount, totalCount?, assembledQuery, domain, dataset_id, canvas_id?, canvas_row_count? }`.
 
 - `totalCount` is included when a plain row query is truncated (`rowCount < totalCount`) so the agent knows to paginate or narrow the query. Omitted for grouped/aggregate queries (`group` set) — the count strategy counts source rows, which would not describe the returned groups.
-- `canvasId` is included when results spilled to a DataCanvas table (requires `CANVAS_PROVIDER_TYPE=duckdb`). Use with `socrata_dataframe_query` to run SQL against the full result set. Socrata system columns (`:@computed_region_*`) are excluded from the spilled table — they are not valid canvas identifiers; the inline `rows` keep them.
+- `canvas_id` is included when results spilled to a DataCanvas table (requires `CANVAS_PROVIDER_TYPE=duckdb`). The spill drains the matching set across paginated SODA calls into a **bounded copy** — up to 50,000 rows, reported in `canvas_row_count` — and `socrata_dataframe_query` runs SQL over that staged copy. When `total_count` exceeds the cap the canvas holds a subset, not the literal full result set; page with `offset` to reach rows beyond it. The inline `rows` stay bounded by the caller's `limit`. Socrata system columns (`:@computed_region_*`) are excluded from the spilled table — they are not valid canvas identifiers; the inline `rows` keep them.
 
 **SODA 2.1 quirks surfaced in output:**
 - All row values are strings in SODA 2.1 — even numeric columns. The column schema (`socrata_get_dataset`) is the source of truth for types; numeric parsing happens only when the caller needs it.
@@ -250,7 +250,7 @@ Only meaningful when `CANVAS_PROVIDER_TYPE=duckdb`. Follow the DataCanvas patter
 | 1 | `socrata_find_datasets` | Discover datasets matching the topic; get dataset IDs and domains |
 | 2 | `socrata_get_dataset` | Inspect schema — column names, types, descriptions — before writing queries |
 | 3 | `socrata_query_dataset` | Execute query; optional canvas spillover for large result sets |
-| 4 | `socrata_dataframe_query` | (Optional) SQL over full spilled result set when canvas is enabled |
+| 4 | `socrata_dataframe_query` | (Optional) SQL over the bounded result set spilled to canvas when enabled |
 
 ### Portal-first workflow (agent doesn't know which portal to target)
 
@@ -317,7 +317,7 @@ Only meaningful when `CANVAS_PROVIDER_TYPE=duckdb`. Follow the DataCanvas patter
 | Domain parameter strategy | Optional per-call `domain` param, defaults to `SOCRATA_DEFAULT_DOMAIN` env var | Agents that always target one portal don't need to repeat it; agents hopping portals can override per call. |
 | SoQL exposure | Structured params (`select`, `where`, `group`) + `search` shortcut | Raw SoQL string would require agents to know SoQL syntax. Structured params are safer and composable. The assembled query is returned so agents can learn the pattern. |
 | Dataset discovery: cross-portal vs. per-portal | Both exposed via single tool; `domain` scopes to per-portal | Cross-portal is the power move; per-portal is common. One tool handles both rather than two separate discovery tools. |
-| Canvas spillover | Opt-in via `CANVAS_PROVIDER_TYPE=duckdb` | Large civic datasets can have millions of rows — the 5000-row cap is a hard stop without canvas. Canvas is DuckDB-backed, so it's not suitable for all deployment contexts. Keep it opt-in, not default. |
+| Canvas spillover | Opt-in via `CANVAS_PROVIDER_TYPE=duckdb`; stages a bounded copy (up to 50,000 rows) drained across paginated SODA calls | Large civic datasets have millions of rows; a single SODA call caps at 5000. When canvas is enabled, the spill paginates the matching set into a bounded copy (`canvas_row_count`) so `socrata_dataframe_query` runs SQL over more than one page — honestly a bounded subset, not the literal full set when the match exceeds the cap. Canvas is DuckDB-backed, so it stays opt-in, not default. |
 | `socrata_list_portals` — client-side vs server-side filter | Client-side substring match on query | The domains endpoint returns the full list (a few hundred entries); no server-side text filter exists. The list is small enough for in-process filtering. |
 | Computed region columns | Filtered from default schema/row output | `:@computed_region_*` columns are geospatial join artifacts added by the platform — not actual dataset data. Including them by default adds noise in schema output. Let users explicitly `$select` them if needed. |
 | Row count default | 100 rows, max 5000 | Socrata's own default is 1000 with no ceiling. 100 keeps payloads manageable for typical agent workflows. 5000 cap prevents accidentally blowing context budgets on wide datasets. |

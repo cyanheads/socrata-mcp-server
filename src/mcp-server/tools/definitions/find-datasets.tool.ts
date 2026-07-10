@@ -210,9 +210,9 @@ export const findDatasets = tool('socrata_find_datasets', {
         lines.push(...upstreamBlockquote('Upstream dataset description', ds.description), '');
       }
       if (ds.column_names.length) {
-        lines.push(
-          `**Columns (preview):** ${ds.column_names.slice(0, 8).join(', ')}${ds.column_names.length > 8 ? ` (+${ds.column_names.length - 8} more)` : ''}`,
-        );
+        // Render the full column list structuredContent carries — a render-only
+        // slice here would drop names content[]-reading clients can't recover.
+        lines.push(`**Columns (preview):** ${ds.column_names.join(', ')}`);
       }
       if (ds.data_updated_at != null) lines.push(`**Last updated:** ${ds.data_updated_at}`);
       if (ds.view_count != null) lines.push(`**Views:** ${ds.view_count}`);
