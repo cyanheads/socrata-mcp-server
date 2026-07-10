@@ -5,11 +5,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import {
-  configurationError,
-  serviceUnavailable,
-  validationError,
-} from '@cyanheads/mcp-ts-core/errors';
+import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
@@ -92,6 +88,26 @@ const KNOWN_PORTALS: ReadonlyArray<Omit<PortalEntry, 'datasetCount'>> = [
   { domain: 'data.calgary.ca', organization: 'City of Calgary' },
 ];
 
+/**
+ * Discovery-catalog domain aliases. A few portals keep a public vanity domain
+ * for direct SODA access (metadata + row queries by dataset ID) while their
+ * catalog assets are indexed under a separate Socrata tenant with a different
+ * hostname — so a Discovery search scoped to the vanity domain alone returns
+ * nothing. When a caller scopes {@link SocrataService.findDatasets} to a domain
+ * listed here, each alias is comma-joined into the Discovery `domains` filter (an
+ * OR); the caller's original domain is always retained, never substituted. Both
+ * hostnames still serve the SODA views/resource endpoints for the same dataset
+ * ID, so get/query chaining works regardless of which domain is reported back.
+ *
+ * Seattle: `data.seattle.gov` (→ seattle.socrata.com) has zero Discovery members;
+ * its datasets are cataloged under `cos-data.seattle.gov` (a distinct
+ * *.cust.socrata.net tenant, not a DNS alias). Verified live 2026-07-10 against
+ * api.us.socrata.com/api/catalog/v1. Extend this map as other such portals surface.
+ */
+const DISCOVERY_DOMAIN_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  'data.seattle.gov': ['cos-data.seattle.gov'],
+};
+
 /** How long a successful portal-count refresh stays fresh. */
 const PORTAL_COUNT_TTL_MS = 24 * 60 * 60 * 1000;
 /** Retry sooner when a refresh produced no counts at all (upstream outage). */
@@ -167,13 +183,23 @@ const GEO_TYPES = new Set([
 ]);
 
 export class SocrataService {
-  /** Build the default request headers, optionally adding the app token. */
+  /**
+   * Set to `true` once Socrata rejects the configured app token (403 invalid
+   * token). While set, {@link buildHeaders} omits `X-App-Token`, so every later
+   * request — and the immediate keyless retry in {@link fetchJson} — runs keyless.
+   * Process-lifetime state, cleared by a restart with a corrected token. An
+   * instance field (not module scope) so the singleton owns it and each
+   * `new SocrataService()` in tests starts with a clean slate.
+   */
+  private appTokenDisabled = false;
+
+  /** Build the default request headers, adding the app token unless it's disabled. */
   private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       Accept: 'application/json',
     };
     const token = getServerConfig().appToken;
-    if (token) {
+    if (token && !this.appTokenDisabled) {
       headers['X-App-Token'] = token;
     }
     return headers;
@@ -218,18 +244,28 @@ export class SocrataService {
                 socrataCode,
               });
             }
-            if (response.status === 403 && /app[_ ]token/i.test(sodaErr.message)) {
-              // Invalid SOCRATA_APP_TOKEN — a config problem, not a caller-permissions one.
-              // Discriminate on the message content: a private-dataset denial also returns
-              // 403 permission_denied but without mentioning the app token, and must keep
-              // the generic path below. Never include the token value here.
-              throw configurationError(
-                `Socrata rejected the configured app token: ${sodaErr.message}`,
-                {
-                  reason: 'invalid_app_token',
-                  socrataCode,
-                },
+            if (
+              response.status === 403 &&
+              /app[_ ]token/i.test(sodaErr.message) &&
+              getServerConfig().appToken &&
+              !this.appTokenDisabled
+            ) {
+              // Optional-credential degradation: an invalid or revoked
+              // SOCRATA_APP_TOKEN is not a hard dependency — the same request
+              // succeeds keyless (the no-token default). Disable the token for the
+              // rest of the process, warn once, and retry this call keyless.
+              // buildHeaders() now omits X-App-Token, so the retry sends no token;
+              // a later app-token 403 (flag already set, or no token configured)
+              // is a genuine permissions failure and falls through to the generic
+              // path below — the keyless retry can never re-enter here. A
+              // private-dataset denial returns 403 without mentioning the app token
+              // and also takes the generic path. Never log the token value.
+              this.appTokenDisabled = true;
+              ctx.log.warning(
+                'SOCRATA_APP_TOKEN rejected (invalid or revoked) — falling back to keyless requests; per-IP rate limits apply. Replace or unset the token to restore higher limits.',
+                { reason: 'invalid_app_token' },
               );
+              return this.fetchJson<T>(url, ctx);
             }
             if (response.status === 429) {
               throw serviceUnavailable(`Socrata API rate limited: ${sodaErr.message}`, {
@@ -280,7 +316,13 @@ export class SocrataService {
   ): Promise<{ results: DiscoveryResult[]; totalCount: number }> {
     const params = new URLSearchParams();
     if (opts.query) params.set('q', opts.query);
-    if (opts.domain) params.set('domains', opts.domain);
+    if (opts.domain) {
+      // Comma-join any known Discovery alias (an OR filter) so a search scoped to
+      // a vanity domain also covers its catalog-canonical sibling. The caller's
+      // domain always stays in the filter — augment, never substitute.
+      const aliases = DISCOVERY_DOMAIN_ALIASES[opts.domain];
+      params.set('domains', aliases ? [opts.domain, ...aliases].join(',') : opts.domain);
+    }
     if (opts.categories?.length) params.set('categories', opts.categories.join(','));
     if (opts.tags?.length) params.set('tags', opts.tags.join(','));
     if (opts.only) params.set('only', opts.only);

@@ -1,9 +1,10 @@
 /**
  * @fileoverview Tests for the SocrataService fetch layer — SODA error-shape
  * detection in fetchJson (both `code` and `errorCode` families, app-token 403
- * discrimination), the grouped-query recount skip in queryDataset, the
- * TTL-cached per-portal dataset counts in listPortals, and row-count
- * derivation from column-level cachedContents in getDataset.
+ * discrimination), the keyless degradation + retry on an invalid app token, the
+ * Discovery domain-alias expansion in findDatasets, the grouped-query recount
+ * skip in queryDataset, the TTL-cached per-portal dataset counts in listPortals,
+ * and row-count derivation from column-level cachedContents in getDataset.
  * Stubs `globalThis.fetch` so the real classification path executes.
  * @module tests/services/socrata-service.test
  */
@@ -100,40 +101,6 @@ describe('SocrataService.fetchJson error classification', () => {
     });
   });
 
-  it('maps a 403 app-token rejection to invalid_app_token without leaking the token value', async () => {
-    const sentinelToken = 'secret-sentinel-token-abc123';
-    mockGetServerConfig.mockReturnValue({
-      appToken: sentinelToken,
-      defaultDomain: 'data.seattle.gov',
-    });
-    // Real upstream shape for an invalid X-App-Token.
-    fetchSpy.mockResolvedValue(
-      jsonResponse(
-        { code: 'permission_denied', error: true, message: 'Invalid app_token specified' },
-        403,
-        'Forbidden',
-      ),
-    );
-
-    const ctx = createMockContext();
-    let thrown: McpError | undefined;
-    try {
-      await svc.getDataset('data.cityofchicago.org', 'ijzp-q8t2', ctx);
-    } catch (err) {
-      thrown = err as McpError;
-    }
-
-    expect(thrown).toBeInstanceOf(McpError);
-    expect(thrown).toMatchObject({
-      code: JsonRpcErrorCode.ConfigurationError,
-      message: expect.stringContaining('Invalid app_token specified'),
-      data: { reason: 'invalid_app_token', socrataCode: 'permission_denied' },
-    });
-    // The configured token value must never appear in the error payload.
-    expect(thrown?.message).not.toContain(sentinelToken);
-    expect(JSON.stringify(thrown?.data ?? {})).not.toContain(sentinelToken);
-  });
-
   it('keeps the generic Forbidden path for a 403 permission_denied that does not mention the app token', async () => {
     fetchSpy.mockResolvedValue(
       jsonResponse(
@@ -158,6 +125,196 @@ describe('SocrataService.fetchJson error classification', () => {
     expect(thrown).toBeInstanceOf(McpError);
     expect(thrown?.code).toBe(JsonRpcErrorCode.Forbidden);
     expect((thrown?.data as Record<string, unknown> | undefined)?.reason).toBeUndefined();
+  });
+});
+
+describe('SocrataService.fetchJson keyless degradation on invalid app token (#23)', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  const sentinelToken = 'secret-sentinel-token-abc123';
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({
+      appToken: sentinelToken,
+      defaultDomain: 'data.seattle.gov',
+    });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  /** Read the X-App-Token header off a recorded fetch call. */
+  function tokenHeaderOf(call: unknown[]): string | undefined {
+    const headers = (call[1] as RequestInit | undefined)?.headers as
+      | Record<string, string>
+      | undefined;
+    return headers?.['X-App-Token'];
+  }
+
+  const invalidTokenResponse = () =>
+    jsonResponse(
+      { code: 'permission_denied', error: true, message: 'Invalid app_token specified' },
+      403,
+      'Forbidden',
+    );
+
+  it('degrades to keyless and retries when the configured token is rejected — the call succeeds', async () => {
+    // Fresh instance so appTokenDisabled starts false.
+    const svc = new SocrataService();
+    // First (tokened) attempt is rejected; the keyless retry succeeds.
+    fetchSpy
+      .mockResolvedValueOnce(invalidTokenResponse())
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { id: 'kzjm-xkqj', name: 'Seattle Real Time Fire 911 Calls', columns: [] },
+          200,
+          'OK',
+        ),
+      );
+
+    const ctx = createMockContext();
+    const warnSpy = vi.spyOn(ctx.log, 'warning');
+
+    // Before the fix this rejected with a configurationError; now it resolves keyless.
+    const meta = await svc.getDataset('data.seattle.gov', 'kzjm-xkqj', ctx);
+    expect(meta.datasetId).toBe('kzjm-xkqj');
+
+    // Two fetches: the rejected tokened attempt, then the keyless retry.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(tokenHeaderOf(fetchSpy.mock.calls[0] ?? [])).toBe(sentinelToken);
+    expect(tokenHeaderOf(fetchSpy.mock.calls[1] ?? [])).toBeUndefined();
+
+    // Exactly one WARN, and it never carries the token value.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(sentinelToken);
+  });
+
+  it('warns once and stays keyless across later calls after the token is disabled', async () => {
+    const svc = new SocrataService();
+    // Any tokened attempt is rejected; any keyless attempt succeeds.
+    fetchSpy.mockImplementation((_url, init) => {
+      const headers = (init as RequestInit | undefined)?.headers as
+        | Record<string, string>
+        | undefined;
+      return Promise.resolve(
+        headers?.['X-App-Token']
+          ? invalidTokenResponse()
+          : jsonResponse({ id: 'kzjm-xkqj', name: 'X', columns: [] }, 200, 'OK'),
+      );
+    });
+
+    const ctx = createMockContext();
+    const warnSpy = vi.spyOn(ctx.log, 'warning');
+
+    await svc.getDataset('data.seattle.gov', 'kzjm-xkqj', ctx);
+    await svc.getDataset('data.seattle.gov', 'kzjm-xkqj', ctx);
+    await svc.getDataset('data.seattle.gov', 'kzjm-xkqj', ctx);
+
+    // First call disables the token (one 403 + one keyless retry); every later
+    // request skips the token outright, so no further 403 and no second warning.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const tokenedCalls = fetchSpy.mock.calls.filter((c) => tokenHeaderOf(c) !== undefined);
+    expect(tokenedCalls).toHaveLength(1);
+  });
+
+  it('leaves a keyless request (no configured token) on the generic Forbidden path', async () => {
+    // No token configured: an app-token 403 is a genuine permissions failure, not
+    // a degradable optional credential — it must surface, not silently retry.
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    const svc = new SocrataService();
+    fetchSpy.mockResolvedValue(invalidTokenResponse());
+
+    const ctx = createMockContext();
+    const warnSpy = vi.spyOn(ctx.log, 'warning');
+
+    await expect(svc.getDataset('data.seattle.gov', 'kzjm-xkqj', ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+    });
+    // No token to degrade → no retry, no degradation warning.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('SocrataService.findDatasets Discovery domain alias expansion (#21)', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  /** The `domains` query param on the recorded Discovery request. */
+  function domainsParam(): string | null {
+    return new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams.get('domains');
+  }
+
+  it('comma-joins the known alias so a Seattle-scoped search covers both tenants', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ results: [], resultSetSize: 0 }, 200, 'OK'));
+
+    const ctx = createMockContext();
+    await svc.findDatasets({ domain: 'data.seattle.gov', query: 'fire' }, ctx);
+
+    // Before the fix this was just 'data.seattle.gov' (zero Discovery members);
+    // the alias join is what surfaces cos-data.seattle.gov's datasets.
+    expect(domainsParam()).toBe('data.seattle.gov,cos-data.seattle.gov');
+  });
+
+  it('passes a domain with no known alias through unchanged', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ results: [], resultSetSize: 0 }, 200, 'OK'));
+
+    const ctx = createMockContext();
+    await svc.findDatasets({ domain: 'data.cityofchicago.org' }, ctx);
+
+    expect(domainsParam()).toBe('data.cityofchicago.org');
+  });
+
+  it('omits the domains filter entirely for an unscoped search', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ results: [], resultSetSize: 0 }, 200, 'OK'));
+
+    const ctx = createMockContext();
+    await svc.findDatasets({ query: 'fire' }, ctx);
+
+    expect(domainsParam()).toBeNull();
+  });
+
+  it('surfaces results Discovery reports under the alias domain', async () => {
+    // The wanted dataset is indexed under cos-data.seattle.gov even though the
+    // caller scoped to data.seattle.gov — the alias join is what returns it.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          results: [
+            {
+              resource: { id: 'kzjm-xkqj', name: 'Seattle Real Time Fire 911 Calls' },
+              metadata: { domain: 'cos-data.seattle.gov' },
+              classification: {},
+            },
+          ],
+          resultSetSize: 1,
+        },
+        200,
+        'OK',
+      ),
+    );
+
+    const ctx = createMockContext();
+    const { results, totalCount } = await svc.findDatasets(
+      { domain: 'data.seattle.gov', query: 'fire' },
+      ctx,
+    );
+
+    expect(totalCount).toBe(1);
+    expect(results[0]?.datasetId).toBe('kzjm-xkqj');
+    expect(results[0]?.domain).toBe('cos-data.seattle.gov');
   });
 });
 

@@ -103,13 +103,6 @@ export const findDatasets = tool('socrata_find_datasets', {
       retryable: true,
       recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
     },
-    {
-      reason: 'invalid_app_token',
-      code: JsonRpcErrorCode.ConfigurationError,
-      when: 'Socrata rejected the configured SOCRATA_APP_TOKEN.',
-      recovery:
-        'Unset SOCRATA_APP_TOKEN or replace it with a valid Socrata app token, then restart the server.',
-    },
   ],
 
   async handler(input, ctx) {
@@ -144,7 +137,7 @@ export const findDatasets = tool('socrata_find_datasets', {
       // ctx.fail so the contract recovery hint reaches the wire.
       if (err instanceof McpError) {
         const reason = (err.data as Record<string, unknown> | undefined)?.reason;
-        if (reason === 'rate_limited' || reason === 'invalid_app_token') {
+        if (reason === 'rate_limited') {
           throw ctx.fail(reason, err.message, {
             ...(err.data as Record<string, unknown>),
             ...ctx.recoveryFor(reason),

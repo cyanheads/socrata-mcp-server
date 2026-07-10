@@ -229,26 +229,6 @@ describe('queryDataset', () => {
     });
   });
 
-  it('re-throws a service invalid_app_token with the declared recovery hint attached', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    mockQueryDataset.mockRejectedValue(
-      new McpError(
-        JsonRpcErrorCode.ConfigurationError,
-        'Socrata rejected the configured app token: Invalid app_token specified',
-        { reason: 'invalid_app_token', socrataCode: 'permission_denied' },
-      ),
-    );
-
-    const input = queryDataset.input.parse({ dataset_id: 'ijzp-q8t2' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ConfigurationError,
-      data: {
-        reason: 'invalid_app_token',
-        recovery: { hint: expect.stringContaining('SOCRATA_APP_TOKEN') },
-      },
-    });
-  });
-
   it('passes through optional SoQL clauses to service', async () => {
     const ctx = createMockContext({ errors: queryDataset.errors });
     mockQueryDataset.mockResolvedValue({

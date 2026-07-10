@@ -3,7 +3,6 @@
  * @module tests/tools/get-dataset.tool.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getDataset } from '@/mcp-server/tools/definitions/get-dataset.tool.js';
@@ -57,27 +56,6 @@ describe('getDataset', () => {
     expect(result.name).toBe('Seattle 911 Incidents');
     expect(result.columns).toHaveLength(2);
     expect(result.columns[0]).toMatchObject({ field_name: 'incident_type', data_type: 'Text' });
-  });
-
-  it('re-throws a service invalid_app_token with the declared recovery hint attached', async () => {
-    const ctx = createMockContext({ errors: getDataset.errors });
-    mockGetDataset.mockRejectedValue(
-      new McpError(
-        JsonRpcErrorCode.ConfigurationError,
-        'Socrata rejected the configured app token: Invalid app_token specified',
-        { reason: 'invalid_app_token', socrataCode: 'permission_denied' },
-      ),
-    );
-
-    const input = getDataset.input.parse({ dataset_id: 'ijzp-q8t2' });
-    await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ConfigurationError,
-      message: expect.stringContaining('Invalid app_token specified'),
-      data: {
-        reason: 'invalid_app_token',
-        recovery: { hint: expect.stringContaining('SOCRATA_APP_TOKEN') },
-      },
-    });
   });
 
   it('handles sparse upstream metadata (no optional fields)', async () => {
