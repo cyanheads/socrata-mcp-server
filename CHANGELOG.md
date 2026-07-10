@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-07-10
+
+socrata_find_datasets now returns datasets behind Discovery domain aliases (#21); an invalid SOCRATA_APP_TOKEN degrades to keyless instead of failing every call (#23)
+
 ## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-10
 
 Full content[] rendering (#19), bounded paginated canvas spillover (#20), and sql_rejected contract parity (#22); mcp-ts-core ^0.10.14, supply-chain hardening
