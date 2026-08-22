@@ -6,7 +6,6 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
-import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
@@ -215,6 +214,10 @@ export class SocrataService {
         });
 
         if (!response.ok) {
+          // Preserve an unread copy for the framework's generic mapper. This
+          // method inspects the original body for Socrata-specific errors first;
+          // without a clone, generic failures lose their canonical data.body.
+          const errorResponse = response.clone();
           // Try to read structured SODA error before delegating to httpErrorFromResponse.
           // The error-code key varies by subsystem: compiler errors use `code`,
           // query-coordinator errors use `errorCode` — accept either.
@@ -281,7 +284,7 @@ export class SocrataService {
           }
 
           // Generic HTTP error.
-          throw await httpErrorFromResponse(response, {
+          throw await httpErrorFromResponse(errorResponse, {
             service: 'Socrata',
             data: { url: url.slice(0, 200) },
           });
@@ -299,7 +302,7 @@ export class SocrataService {
       },
       {
         operation: 'SocrataService.fetchJson',
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 500,
         signal: ctx.signal,
       },

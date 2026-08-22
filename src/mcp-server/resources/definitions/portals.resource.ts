@@ -5,7 +5,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { extractCursor, paginateArray, requestContextService } from '@cyanheads/mcp-ts-core/utils';
+import { extractCursor, paginateArray } from '@cyanheads/mcp-ts-core/utils';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 export const portalsResource = resource('socrata://portals', {
@@ -17,6 +17,26 @@ export const portalsResource = resource('socrata://portals', {
   params: z.object({
     cursor: z.string().optional().describe('Opaque pagination cursor. Omit for first page.'),
   }),
+  output: z.object({
+    portals: z
+      .array(
+        z
+          .object({
+            domain: z.string().describe('Portal domain used by Socrata API calls.'),
+            organization: z.string().optional().describe('Organization name when available.'),
+            dataset_count: z
+              .number()
+              .nullable()
+              .describe(
+                'Approximate dataset count. Zero is a real count; null means temporarily unavailable.',
+              ),
+          })
+          .describe('A Socrata portal catalog entry.'),
+      )
+      .describe('Portal entries in this page.'),
+    total_count: z.number().describe('Total portal entries before pagination.'),
+    next_cursor: z.string().optional().describe('Opaque cursor for the next page, when present.'),
+  }),
 
   async handler(params, ctx) {
     ctx.log.debug('Fetching portals resource');
@@ -24,11 +44,7 @@ export const portalsResource = resource('socrata://portals', {
     const portals = await svc.listPortals(ctx);
 
     const cursor = extractCursor(params.cursor ? { cursor: params.cursor } : {});
-    const reqCtx = requestContextService.createRequestContext({
-      operation: 'portals-resource',
-      parentContext: { requestId: ctx.requestId, traceId: ctx.traceId },
-    });
-    const page = paginateArray(portals, cursor, 50, 200, reqCtx);
+    const page = paginateArray(portals, cursor, 50, 200, ctx);
 
     return {
       portals: page.items.map((p) => ({

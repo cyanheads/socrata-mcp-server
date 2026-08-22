@@ -32,7 +32,7 @@ describe('portalsResource', () => {
   describe('handler', () => {
     it('returns the first page of portals without a cursor', async () => {
       const ctx = createMockContext();
-      const params = portalsResource.params.parse({});
+      const params = portalsResource.params!.parse({});
       const result = await portalsResource.handler(params, ctx);
 
       expect(result.portals).toBeInstanceOf(Array);
@@ -50,11 +50,11 @@ describe('portalsResource', () => {
         { domain: 'data.other.gov', datasetCount: 5 }, // no organization
       ]);
       const ctx = createMockContext();
-      const params = portalsResource.params.parse({});
+      const params = portalsResource.params!.parse({});
       const result = await portalsResource.handler(params, ctx);
 
-      expect(result.portals[0].organization).toBe('Example Agency');
-      expect(result.portals[1].organization).toBeUndefined();
+      expect(result.portals[0]!.organization).toBe('Example Agency');
+      expect(result.portals[1]!.organization).toBeUndefined();
     });
 
     it('passes through zero and null dataset counts untouched', async () => {
@@ -63,17 +63,17 @@ describe('portalsResource', () => {
         { domain: 'data.gov', datasetCount: null }, // count temporarily unavailable
       ]);
       const ctx = createMockContext();
-      const params = portalsResource.params.parse({});
+      const params = portalsResource.params!.parse({});
       const result = await portalsResource.handler(params, ctx);
 
-      expect(result.portals[0].dataset_count).toBe(0);
-      expect(result.portals[1].dataset_count).toBeNull();
+      expect(result.portals[0]!.dataset_count).toBe(0);
+      expect(result.portals[1]!.dataset_count).toBeNull();
     });
 
     it('handles an empty portal list from the service', async () => {
       mockListPortals.mockResolvedValue([]);
       const ctx = createMockContext();
-      const params = portalsResource.params.parse({});
+      const params = portalsResource.params!.parse({});
       const result = await portalsResource.handler(params, ctx);
 
       expect(result.portals).toHaveLength(0);
@@ -90,7 +90,7 @@ describe('portalsResource', () => {
       mockListPortals.mockResolvedValue(manyPortals);
 
       const ctx = createMockContext();
-      const params = portalsResource.params.parse({});
+      const params = portalsResource.params!.parse({});
       const result = await portalsResource.handler(params, ctx);
 
       // Default page size is 50 — 60 entries means there is a next page.
@@ -111,13 +111,13 @@ describe('portalsResource', () => {
       const ctx = createMockContext();
 
       // First page — capture cursor.
-      const firstPage = await portalsResource.handler(portalsResource.params.parse({}), ctx);
+      const firstPage = await portalsResource.handler(portalsResource.params!.parse({}), ctx);
       const cursor = firstPage.next_cursor;
       expect(cursor).toBeDefined();
 
       // Second page via cursor.
       const secondPage = await portalsResource.handler(
-        portalsResource.params.parse({ cursor }),
+        portalsResource.params!.parse({ cursor }),
         ctx,
       );
       expect(secondPage.portals).toBeInstanceOf(Array);
@@ -127,7 +127,7 @@ describe('portalsResource', () => {
     it('propagates service errors', async () => {
       mockListPortals.mockRejectedValue(new Error('Discovery API unreachable'));
       const ctx = createMockContext();
-      const params = portalsResource.params.parse({});
+      const params = portalsResource.params!.parse({});
       await expect(portalsResource.handler(params, ctx)).rejects.toThrow(
         'Discovery API unreachable',
       );
@@ -135,8 +135,9 @@ describe('portalsResource', () => {
   });
 
   describe('list', () => {
-    it('returns a resource listing with at least one entry', () => {
-      const listing = portalsResource.list!();
+    it('returns a resource listing with at least one entry', async () => {
+      const serverContext = {} as Parameters<NonNullable<typeof portalsResource.list>>[0];
+      const listing = await portalsResource.list!(serverContext);
       expect(listing.resources).toBeInstanceOf(Array);
       expect(listing.resources.length).toBeGreaterThan(0);
       for (const r of listing.resources) {

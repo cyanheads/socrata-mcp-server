@@ -144,7 +144,7 @@ describe('queryDataset', () => {
     expect(spilled.every((row) => Object.keys(row).every((k) => !k.startsWith(':')))).toBe(true);
     expect(spilled[0]).toEqual({ id: '0', primary_type: 'THEFT' });
     // Inline rows keep every column, system keys included.
-    expect(result.rows[0]).toHaveProperty(':@computed_region_awaf_s7ux');
+    expect(result.rows[0]!).toHaveProperty(':@computed_region_awaf_s7ux');
     expect(result.canvas_id).toBe('abc1234567');
     expect(result.canvas_row_count).toBe(5);
   });
@@ -246,7 +246,7 @@ describe('queryDataset', () => {
     });
     await queryDataset.handler(input, ctx);
 
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.select).toBe('category, count(*) as n');
     expect(call.group).toBe('category');
     expect(call.order).toBe('n DESC');

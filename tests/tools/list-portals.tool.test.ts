@@ -37,7 +37,7 @@ describe('listPortals', () => {
     expect(result.portals).toHaveLength(3);
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalCount).toBe(3);
-    expect(result.portals[0]).toMatchObject({
+    expect(result.portals[0]!).toMatchObject({
       domain: 'data.seattle.gov',
       organization: 'City of Seattle',
       dataset_count: 500,
@@ -50,7 +50,7 @@ describe('listPortals', () => {
     const result = await listPortals.handler(input, ctx);
 
     expect(result.portals).toHaveLength(1);
-    expect(result.portals[0].domain).toBe('data.seattle.gov');
+    expect(result.portals[0]!.domain).toBe('data.seattle.gov');
   });
 
   it('returns enrichment notice when filter matches nothing', async () => {
@@ -72,7 +72,7 @@ describe('listPortals', () => {
 
     expect(result.portals).toHaveLength(2);
     // offset=1 skips first portal (seattle), returns NY and SF
-    expect(result.portals[0].domain).toBe('data.cityofnewyork.us');
+    expect(result.portals[0]!.domain).toBe('data.cityofnewyork.us');
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalCount).toBe(3);
   });
@@ -85,8 +85,8 @@ describe('listPortals', () => {
     const input = listPortals.input.parse({});
     const result = await listPortals.handler(input, ctx);
 
-    expect(result.portals[0].organization).toBeUndefined();
-    expect(result.portals[0].dataset_count).toBe(100);
+    expect(result.portals[0]!.organization).toBeUndefined();
+    expect(result.portals[0]!.dataset_count).toBe(100);
   });
 
   it('passes through a genuine zero count and a null (unavailable) count untouched', async () => {
@@ -102,8 +102,8 @@ describe('listPortals', () => {
     const input = listPortals.input.parse({});
     const result = await listPortals.handler(input, ctx);
 
-    expect(result.portals[0].dataset_count).toBe(0);
-    expect(result.portals[1].dataset_count).toBeNull();
+    expect(result.portals[0]!.dataset_count).toBe(0);
+    expect(result.portals[1]!.dataset_count).toBeNull();
   });
 
   it('formats portals as a markdown table', () => {

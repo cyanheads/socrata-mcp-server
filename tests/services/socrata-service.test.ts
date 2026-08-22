@@ -11,7 +11,7 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { resetPortalCountCache, SocrataService } from '@/services/socrata/socrata-service.js';
 
 vi.mock('@/config/server-config.js', () => ({
@@ -32,7 +32,7 @@ function jsonResponse(body: unknown, status: number, statusText: string): Respon
 }
 
 describe('SocrataService.fetchJson error classification', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
   beforeEach(() => {
@@ -102,17 +102,12 @@ describe('SocrataService.fetchJson error classification', () => {
   });
 
   it('keeps the generic Forbidden path for a 403 permission_denied that does not mention the app token', async () => {
-    fetchSpy.mockResolvedValue(
-      jsonResponse(
-        {
-          code: 'permission_denied',
-          error: true,
-          message: 'You do not have permission to view this dataset',
-        },
-        403,
-        'Forbidden',
-      ),
-    );
+    const body = {
+      code: 'permission_denied',
+      error: true,
+      message: 'You do not have permission to view this dataset',
+    };
+    fetchSpy.mockResolvedValue(jsonResponse(body, 403, 'Forbidden'));
 
     const ctx = createMockContext();
     let thrown: McpError | undefined;
@@ -122,14 +117,18 @@ describe('SocrataService.fetchJson error classification', () => {
       thrown = err as McpError;
     }
 
-    expect(thrown).toBeInstanceOf(McpError);
-    expect(thrown?.code).toBe(JsonRpcErrorCode.Forbidden);
-    expect((thrown?.data as Record<string, unknown> | undefined)?.reason).toBeUndefined();
+    if (!(thrown instanceof McpError)) throw new Error('Expected an McpError.');
+    expect(thrown.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(thrown.data).toMatchObject({
+      status: 403,
+      body: JSON.stringify(body),
+    });
+    expect((thrown.data as Record<string, unknown>).reason).toBeUndefined();
   });
 });
 
 describe('SocrataService.fetchJson keyless degradation on invalid app token (#23)', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const sentinelToken = 'secret-sentinel-token-abc123';
 
   beforeEach(() => {
@@ -239,7 +238,7 @@ describe('SocrataService.fetchJson keyless degradation on invalid app token (#23
 });
 
 describe('SocrataService.findDatasets Discovery domain alias expansion (#21)', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
   beforeEach(() => {
@@ -319,7 +318,7 @@ describe('SocrataService.findDatasets Discovery domain alias expansion (#21)', (
 });
 
 describe('SocrataService.queryDataset total-count recount', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
   beforeEach(() => {
@@ -385,7 +384,7 @@ describe('SocrataService.queryDataset total-count recount', () => {
 });
 
 describe('SocrataService.listPortals portal-count cache', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
   /** Per-domain counts observed live (2026-07-04) with `only=dataset&limit=0`. */
@@ -478,7 +477,7 @@ describe('SocrataService.listPortals portal-count cache', () => {
 });
 
 describe('SocrataService.getDataset row-count derivation', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
   beforeEach(() => {
@@ -642,7 +641,7 @@ describe('SocrataService.getDataset row-count derivation', () => {
 });
 
 describe('SocrataService.streamDatasetRows pagination', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn<typeof globalThis, 'fetch'>>;
+  let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
   beforeEach(() => {

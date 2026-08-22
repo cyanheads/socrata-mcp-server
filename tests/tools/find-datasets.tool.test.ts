@@ -41,7 +41,7 @@ describe('findDatasets', () => {
     const result = await findDatasets.handler(input, ctx);
 
     expect(result.results).toHaveLength(1);
-    expect(result.results[0]).toMatchObject({
+    expect(result.results[0]!).toMatchObject({
       dataset_id: 'kzjm-xkqj',
       domain: 'data.seattle.gov',
       name: 'Seattle 911 Incidents',
@@ -72,7 +72,7 @@ describe('findDatasets', () => {
     const input = findDatasets.input.parse({ domain: 'data.seattle.gov' });
     await findDatasets.handler(input, ctx);
 
-    const call = mockFindDatasets.mock.calls[0][0];
+    const call = mockFindDatasets.mock.calls[0]![0];
     expect(call.domain).toBe('data.seattle.gov');
   });
 
@@ -117,13 +117,13 @@ describe('findDatasets', () => {
     const input = findDatasets.input.parse({});
     const result = await findDatasets.handler(input, ctx);
 
-    expect(result.results[0]).toMatchObject({
+    expect(result.results[0]!).toMatchObject({
       dataset_id: 'aaaa-1111',
       name: 'Minimal Dataset',
     });
-    expect(result.results[0].description).toBeUndefined();
-    expect(result.results[0].license).toBeUndefined();
-    expect(result.results[0].view_count).toBeUndefined();
+    expect(result.results[0]!.description).toBeUndefined();
+    expect(result.results[0]!.license).toBeUndefined();
+    expect(result.results[0]!.view_count).toBeUndefined();
   });
 
   it('formats results with dataset IDs and names', () => {

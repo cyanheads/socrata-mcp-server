@@ -6,15 +6,21 @@
 import { describe, expect, it } from 'vitest';
 import { exploreOpenData } from '@/mcp-server/prompts/definitions/explore-open-data.prompt.js';
 
-describe('exploreOpenData prompt', () => {
-  it('generates a message for the minimum required input', () => {
-    const args = exploreOpenData.args.parse({ topic: 'traffic collisions 2023' });
-    const messages = exploreOpenData.generate(args);
+async function generatePromptText(input: {
+  topic: string;
+  portal?: string;
+  geography?: string;
+}): Promise<string> {
+  const args = exploreOpenData.args!.parse(input);
+  const messages = await exploreOpenData.generate(args);
+  const message = messages[0];
+  if (message?.content.type !== 'text') throw new Error('Expected a text prompt message.');
+  return message.content.text;
+}
 
-    expect(messages).toHaveLength(1);
-    expect(messages[0].role).toBe('user');
-    expect(messages[0].content.type).toBe('text');
-    const text = messages[0].content.text as string;
+describe('exploreOpenData prompt', () => {
+  it('generates a message for the minimum required input', async () => {
+    const text = await generatePromptText({ topic: 'traffic collisions 2023' });
     expect(text).toContain('traffic collisions 2023');
     // Should include workflow steps
     expect(text).toContain('socrata_list_portals');
@@ -23,74 +29,60 @@ describe('exploreOpenData prompt', () => {
     expect(text).toContain('socrata_query_dataset');
   });
 
-  it('includes the portal domain in the message when provided', () => {
-    const args = exploreOpenData.args.parse({
+  it('includes the portal domain in the message when provided', async () => {
+    const text = await generatePromptText({
       topic: 'food inspection failures',
       portal: 'data.seattle.gov',
     });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
 
     expect(text).toContain('data.seattle.gov');
     // When portal is known, skip list-portals step
     expect(text).not.toContain('socrata_list_portals');
   });
 
-  it('includes geography scope in the message when provided', () => {
-    const args = exploreOpenData.args.parse({
+  it('includes geography scope in the message when provided', async () => {
+    const text = await generatePromptText({
       topic: '311 service requests',
       portal: 'data.cityofnewyork.us',
       geography: 'Brooklyn',
     });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
 
     expect(text).toContain('Brooklyn');
     expect(text).toContain('WHERE');
   });
 
-  it('does not include portal line when portal is omitted', () => {
-    const args = exploreOpenData.args.parse({ topic: 'housing permits' });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
+  it('does not include portal line when portal is omitted', async () => {
+    const text = await generatePromptText({ topic: 'housing permits' });
 
     // Without a portal, the message should tell the user to discover one first.
     expect(text).toContain('socrata_list_portals');
   });
 
-  it('does not include geography line when geography is omitted', () => {
-    const args = exploreOpenData.args.parse({ topic: 'budget spending' });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
+  it('does not include geography line when geography is omitted', async () => {
+    const text = await generatePromptText({ topic: 'budget spending' });
 
     // No empty geography line should appear — filtered out.
     expect(text).not.toMatch(/Geography:\s*\n/);
   });
 
-  it('includes aggregation guidance in all generated messages', () => {
-    const args = exploreOpenData.args.parse({ topic: 'crime statistics' });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
+  it('includes aggregation guidance in all generated messages', async () => {
+    const text = await generatePromptText({ topic: 'crime statistics' });
 
     // Step 5 aggregation section should always be present.
     expect(text).toContain('count(*)');
     expect(text).toContain('group');
   });
 
-  it('handles unicode and special chars in topic without throwing', () => {
-    const args = exploreOpenData.args.parse({
+  it('handles unicode and special chars in topic without throwing', async () => {
+    const text = await generatePromptText({
       topic: 'café inspections — données 2024',
     });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
 
     expect(text).toContain('café inspections');
   });
 
-  it('does not leak any environment or secret values in the message', () => {
-    const args = exploreOpenData.args.parse({ topic: 'test topic' });
-    const messages = exploreOpenData.generate(args);
-    const text = messages[0].content.text as string;
+  it('does not leak any environment or secret values in the message', async () => {
+    const text = await generatePromptText({ topic: 'test topic' });
 
     // No API token or internal env var patterns should appear.
     expect(text).not.toMatch(/SOCRATA_APP_TOKEN/);

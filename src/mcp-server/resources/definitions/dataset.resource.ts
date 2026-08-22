@@ -21,6 +21,39 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
       .string()
       .describe('Four-by-four dataset ID (e.g. kzjm-xkqj). Obtain from socrata_find_datasets.'),
   }),
+  output: z.object({
+    dataset_id: z.string().describe('Four-by-four Socrata dataset ID.'),
+    domain: z.string().describe('Portal domain hosting the dataset.'),
+    name: z.string().describe('Dataset display name.'),
+    description: z.string().optional().describe('Dataset description when available.'),
+    category: z.string().optional().describe('Dataset category when available.'),
+    tags: z.array(z.string()).describe('Dataset tags.'),
+    row_count: z.number().optional().describe('Approximate row count when available.'),
+    row_count_source: z
+      .enum(['top_level_cached_contents', 'column_cached_contents'])
+      .optional()
+      .describe('Provenance for the approximate row count when available.'),
+    data_updated_at: z
+      .string()
+      .optional()
+      .describe('ISO 8601 timestamp of the latest data update when available.'),
+    license: z.string().optional().describe('Dataset license when available.'),
+    columns: z
+      .array(
+        z
+          .object({
+            field_name: z.string().describe('Column field name used in SoQL queries.'),
+            data_type: z.string().describe('Socrata data type.'),
+            description: z.string().optional().describe('Column description when available.'),
+            non_null_count: z
+              .number()
+              .optional()
+              .describe('Non-null row count for this column when available.'),
+          })
+          .describe('A dataset column.'),
+      )
+      .describe('Typed dataset columns.'),
+  }),
 
   async handler(params, ctx) {
     if (!DATASET_ID_PATTERN.test(params.datasetId)) {

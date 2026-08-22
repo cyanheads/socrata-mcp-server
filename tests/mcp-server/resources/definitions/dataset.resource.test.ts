@@ -41,7 +41,7 @@ describe('datasetResource', () => {
         ],
       });
 
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.seattle.gov',
         datasetId: 'kzjm-xkqj',
       });
@@ -57,7 +57,7 @@ describe('datasetResource', () => {
       expect(result.license).toBe('Public Domain');
       expect(Array.isArray(result.columns)).toBe(true);
       expect(result.columns).toHaveLength(2);
-      expect(result.columns[0]).toMatchObject({
+      expect(result.columns[0]!).toMatchObject({
         field_name: 'incident_type',
         data_type: 'Text',
         description: 'Type of incident',
@@ -66,7 +66,7 @@ describe('datasetResource', () => {
 
     it('throws ValidationError for a malformed dataset ID', async () => {
       const ctx = createMockContext();
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.seattle.gov',
         datasetId: 'not-valid',
       });
@@ -77,7 +77,7 @@ describe('datasetResource', () => {
 
     it('throws ValidationError for dataset ID with wrong length segments', async () => {
       const ctx = createMockContext();
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.seattle.gov',
         datasetId: 'ab-1234',
       });
@@ -94,7 +94,7 @@ describe('datasetResource', () => {
         columns: [],
       });
 
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.example.gov',
         datasetId: 'aaaa-1111',
       });
@@ -114,7 +114,7 @@ describe('datasetResource', () => {
         // description, category, rowCount, dataUpdatedAt, license all absent
       });
 
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.example.gov',
         datasetId: 'bbbb-2222',
       });
@@ -143,7 +143,7 @@ describe('datasetResource', () => {
         columns: [],
       });
 
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.cityofchicago.org',
         datasetId: 'ijzp-q8t2',
       });
@@ -171,23 +171,23 @@ describe('datasetResource', () => {
         ],
       });
 
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.example.gov',
         datasetId: 'cccc-3333',
       });
       const result = await datasetResource.handler(params, ctx);
 
-      expect(result.columns[0].non_null_count).toBe(9000);
-      expect(result.columns[0].description).toBe('Dollar amount');
-      expect(result.columns[1].non_null_count).toBeUndefined();
-      expect(result.columns[1].description).toBeUndefined();
+      expect(result.columns[0]!.non_null_count).toBe(9000);
+      expect(result.columns[0]!.description).toBe('Dollar amount');
+      expect(result.columns[1]!.non_null_count).toBeUndefined();
+      expect(result.columns[1]!.description).toBeUndefined();
     });
 
     it('propagates service errors without swallowing them', async () => {
       const ctx = createMockContext();
       mockGetDataset.mockRejectedValue(new Error('Network timeout'));
 
-      const params = datasetResource.params.parse({
+      const params = datasetResource.params!.parse({
         domain: 'data.example.gov',
         datasetId: 'dddd-4444',
       });
@@ -196,8 +196,9 @@ describe('datasetResource', () => {
   });
 
   describe('list', () => {
-    it('returns at least one example resource entry', () => {
-      const listing = datasetResource.list!();
+    it('returns at least one example resource entry', async () => {
+      const serverContext = {} as Parameters<NonNullable<typeof datasetResource.list>>[0];
+      const listing = await datasetResource.list!(serverContext);
       expect(listing.resources).toBeInstanceOf(Array);
       expect(listing.resources.length).toBeGreaterThan(0);
       for (const r of listing.resources) {

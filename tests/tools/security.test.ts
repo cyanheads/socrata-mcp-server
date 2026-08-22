@@ -230,7 +230,7 @@ describe('SoQL injection pass-through', () => {
       where: "1=1 OR 1=1'; DROP TABLE data; --",
     });
     await queryDataset.handler(input, ctx);
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.where).toBe("1=1 OR 1=1'; DROP TABLE data; --");
   });
 
@@ -246,7 +246,7 @@ describe('SoQL injection pass-through', () => {
       select: '*, (SELECT password FROM users)',
     });
     await queryDataset.handler(input, ctx);
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.select).toBe('*, (SELECT password FROM users)');
   });
 });
@@ -262,7 +262,7 @@ describe('whitespace-only inputs', () => {
     const input = findDatasets.input.parse({ query: '   ' });
     await findDatasets.handler(input, ctx);
 
-    const call = mockFindDatasets.mock.calls[0][0];
+    const call = mockFindDatasets.mock.calls[0]![0];
     expect(call.query).toBeUndefined();
   });
 
@@ -272,7 +272,7 @@ describe('whitespace-only inputs', () => {
     const input = findDatasets.input.parse({ domain: '   ' });
     await findDatasets.handler(input, ctx);
 
-    const call = mockFindDatasets.mock.calls[0][0];
+    const call = mockFindDatasets.mock.calls[0]![0];
     expect(call.domain).toBeUndefined();
   });
 
@@ -286,7 +286,7 @@ describe('whitespace-only inputs', () => {
     const input = queryDataset.input.parse({ dataset_id: 'abcd-1234', where: '   ' });
     await queryDataset.handler(input, ctx);
 
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.where).toBeUndefined();
   });
 
@@ -300,7 +300,7 @@ describe('whitespace-only inputs', () => {
     const input = queryDataset.input.parse({ dataset_id: 'abcd-1234', select: '   ' });
     await queryDataset.handler(input, ctx);
 
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.select).toBeUndefined();
   });
 
@@ -328,7 +328,7 @@ describe('unicode and special characters in inputs', () => {
     const input = findDatasets.input.parse({ query: '日本語データ 🌏' });
     await findDatasets.handler(input, ctx);
 
-    const call = mockFindDatasets.mock.calls[0][0];
+    const call = mockFindDatasets.mock.calls[0]![0];
     expect(call.query).toBe('日本語データ 🌏');
   });
 
@@ -342,7 +342,7 @@ describe('unicode and special characters in inputs', () => {
     const result = await listPortals.handler(input, ctx);
 
     expect(result.portals).toHaveLength(1);
-    expect(result.portals[0].domain).toBe('données.gov.fr');
+    expect(result.portals[0]!.domain).toBe('données.gov.fr');
   });
 });
 
@@ -484,7 +484,7 @@ describe('empty result sets and pagination', () => {
     });
     await queryDataset.handler(input, ctx);
 
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.having).toBe('count(*) > 10');
     expect(call.group).toBe('category');
   });
@@ -502,7 +502,7 @@ describe('empty result sets and pagination', () => {
     });
     await queryDataset.handler(input, ctx);
 
-    const call = mockQueryDataset.mock.calls[0][0];
+    const call = mockQueryDataset.mock.calls[0]![0];
     expect(call.search).toBe('bicycle');
   });
 });

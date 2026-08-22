@@ -31,7 +31,7 @@ const TableInfoSchema = z
 export const dataframeDescribe = tool('socrata_dataframe_describe', {
   title: 'Describe DataCanvas Tables',
   description:
-    'List registered tables in a DataCanvas session — schema, row count, column names, and registration time. Shows what datasets are available for SQL queries via socrata_dataframe_query. Only meaningful when CANVAS_PROVIDER_TYPE=duckdb is set. Use after socrata_query_dataset spills a large result set to canvas.',
+    'List registered tables in a DataCanvas session — schema, row count, and column names. Shows what datasets are available for SQL queries via socrata_dataframe_query. Only meaningful when CANVAS_PROVIDER_TYPE=duckdb is set. Use after socrata_query_dataset spills a large result set to canvas.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     canvas_id: z

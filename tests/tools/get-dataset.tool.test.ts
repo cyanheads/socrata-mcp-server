@@ -55,7 +55,7 @@ describe('getDataset', () => {
     expect(result.dataset_id).toBe('kzjm-xkqj');
     expect(result.name).toBe('Seattle 911 Incidents');
     expect(result.columns).toHaveLength(2);
-    expect(result.columns[0]).toMatchObject({ field_name: 'incident_type', data_type: 'Text' });
+    expect(result.columns[0]!).toMatchObject({ field_name: 'incident_type', data_type: 'Text' });
   });
 
   it('handles sparse upstream metadata (no optional fields)', async () => {
