@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-08-22
+
+MCP SDK v2 compatibility, explicit stateless HTTP serving, resource response schemas, and mcp-ts-core ^0.12.3
+
 ## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-07-10
 
 socrata_find_datasets now returns datasets behind Discovery domain aliases (#21); an invalid SOCRATA_APP_TOKEN degrades to keyless instead of failing every call (#23)

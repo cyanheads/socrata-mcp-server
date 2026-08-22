@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "socrata-mcp-server",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "repository": {
@@ -35,7 +35,8 @@
       "title": "Socrata App Token",
       "description": "App token for higher rate limits. Free to register at any Socrata portal (e.g. data.seattle.gov/profile/app_tokens). Without a token, requests share a throttled pool per IP.",
       "type": "string",
-      "required": false
+      "required": false,
+      "default": ""
     },
     "SOCRATA_DEFAULT_DOMAIN": {
       "title": "Default Portal Domain",

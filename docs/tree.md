@@ -1,10 +1,9 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-07-10 22:03:01
+Generated on: 2026-08-22 20:59:33
 
 ```text
 socrata-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,6 +14,8 @@ socrata-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
