@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { type DataCanvas, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasIdSchema, type DataCanvas, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
@@ -35,9 +35,9 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     'Run SELECT-only SQL against a DataCanvas table populated by socrata_query_dataset. DuckDB infers types from spilled data, so numeric columns that SODA returned as strings become queryable with numeric comparisons (year > 2020, amount < 500). Only works when CANVAS_PROVIDER_TYPE=duckdb is set. Use socrata_dataframe_describe to see registered tables and their schemas.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
-    canvas_id: z
-      .string()
-      .describe('Canvas ID returned from socrata_query_dataset or socrata_dataframe_describe.'),
+    canvas_id: CanvasIdSchema.describe(
+      'Canvas ID returned from socrata_query_dataset or socrata_dataframe_describe.',
+    ),
     sql: z
       .string()
       .describe(

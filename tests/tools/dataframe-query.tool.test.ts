@@ -86,7 +86,7 @@ describe('dataframeQuery', () => {
           new McpError(
             JsonRpcErrorCode.NotFound,
             'Canvas not found or expired. Omit canvas_id to start a new canvas.',
-            { canvasId: 'xxxx-invalid' },
+            { canvasId: 'zzzz999999' },
           ),
         ),
     };
@@ -94,12 +94,20 @@ describe('dataframeQuery', () => {
     setCanvas(mockCanvas as unknown as DataCanvas);
 
     const input = dataframeQuery.input.parse({
-      canvas_id: 'xxxx-invalid',
+      canvas_id: 'zzzz999999',
       sql: 'SELECT * FROM some_table LIMIT 10',
     });
     await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'canvas_not_found' },
     });
+  });
+
+  it('rejects a canvas_id that cannot be a minted token at argument validation', () => {
+    // CanvasIdSchema puts the minted `^[A-Za-z0-9_-]{10}$` shape in inputSchema,
+    // so a malformed token is an argument rejection, never a canvas lookup.
+    expect(() =>
+      dataframeQuery.input.parse({ canvas_id: 'xxxx-invalid', sql: 'SELECT 1' }),
+    ).toThrow();
   });
 
   it('re-throws non-NotFound errors from canvas.acquire unchanged', async () => {

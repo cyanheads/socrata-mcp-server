@@ -24,6 +24,10 @@ await createApp({
   tools: [findDatasets, getDataset, queryDataset, listPortals, dataframeDescribe, dataframeQuery],
   resources: [datasetResource, portalsResource],
   prompts: [exploreOpenData],
+  // No handler gates on ctx.requestInput, so every tool answers in one round
+  // trip — declare the stateless HTTP posture in source rather than relying on
+  // MCP_SESSION_MODE being set in the deployment environment.
+  sessionMode: 'stateless',
   // Public catalog server — serve full landing inventory regardless of auth mode.
   landing: { requireAuth: false },
   instructions:

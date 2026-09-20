@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasIdSchema, type DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
@@ -34,12 +34,9 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     'List registered tables in a DataCanvas session — schema, row count, and column names. Shows what datasets are available for SQL queries via socrata_dataframe_query. Only meaningful when CANVAS_PROVIDER_TYPE=duckdb is set. Use after socrata_query_dataset spills a large result set to canvas.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Canvas ID returned by socrata_query_dataset when a large result spills to canvas. Required in practice when canvas is enabled — canvases cannot be enumerated, so omitting it fails with canvas_id_required instead of listing tables.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Canvas ID returned by socrata_query_dataset when a large result spills to canvas. Required in practice when canvas is enabled — canvases cannot be enumerated, so omitting it fails with canvas_id_required instead of listing tables.',
+    ),
   }),
   output: z.object({
     tables: z
@@ -63,7 +60,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     {
       reason: 'canvas_id_required',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Canvas is enabled but canvas_id was omitted or blank.',
+      when: 'Canvas is enabled but canvas_id was omitted.',
       recovery:
         'Pass the canvas_id returned by socrata_query_dataset when its result spilled to canvas. Canvases cannot be enumerated — if the token was lost, re-run socrata_query_dataset to stage a fresh canvas.',
     },
@@ -86,8 +83,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       return { tables: [] };
     }
 
-    const canvasIdInput = input.canvas_id?.trim() ? input.canvas_id.trim() : undefined;
-    if (!canvasIdInput) {
+    if (!input.canvas_id) {
       // acquire(undefined) would mint a fresh empty canvas and describe it as
       // empty — a misleading silent success. Fail fast instead.
       throw ctx.fail(
@@ -98,7 +94,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
     }
     let instance: Awaited<ReturnType<DataCanvas['acquire']>>;
     try {
-      instance = await canvas.acquire(canvasIdInput, ctx);
+      instance = await canvas.acquire(input.canvas_id, ctx);
     } catch (err) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw ctx.fail('canvas_not_found', err.message, {

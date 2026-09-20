@@ -207,10 +207,13 @@ export class SocrataService {
   /** Fetch JSON from a URL with retry, timeout, and SODA error detection. */
   private fetchJson<T>(url: string, ctx: Context): Promise<T> {
     return withRetry(
-      async () => {
+      async (attempt) => {
+        // attempt.signal composes the caller's abort with withRetry's own
+        // clock, so an in-flight request is interrupted rather than left to
+        // run out on its own.
         const response = await fetch(url, {
           headers: this.buildHeaders(),
-          signal: ctx.signal,
+          signal: attempt.signal,
         });
 
         if (!response.ok) {
@@ -283,10 +286,12 @@ export class SocrataService {
             }
           }
 
-          // Generic HTTP error.
+          // Generic HTTP error. The request URL stays out of the client-facing
+          // error data — a SODA URL carries the caller's SoQL in its query
+          // string — so the host below is the only upstream locator surfaced.
           throw await httpErrorFromResponse(errorResponse, {
             service: 'Socrata',
-            data: { url: url.slice(0, 200) },
+            data: { host: new URL(url).host },
           });
         }
 
@@ -294,7 +299,7 @@ export class SocrataService {
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
           throw serviceUnavailable(
             'Socrata API returned HTML instead of JSON — likely rate-limited or endpoint unavailable.',
-            { url: url.slice(0, 200) },
+            { host: new URL(url).host },
           );
         }
 

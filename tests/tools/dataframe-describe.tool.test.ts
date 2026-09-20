@@ -74,14 +74,14 @@ describe('dataframeDescribe', () => {
           new McpError(
             JsonRpcErrorCode.NotFound,
             'Canvas not found or expired. Omit canvas_id to start a new canvas.',
-            { canvasId: 'xxxx-invalid' },
+            { canvasId: 'zzzz999999' },
           ),
         ),
     };
     const ctx = createMockContext({ errors: dataframeDescribe.errors });
     setCanvas(mockCanvas as unknown as DataCanvas);
 
-    const input = dataframeDescribe.input.parse({ canvas_id: 'xxxx-invalid' });
+    const input = dataframeDescribe.input.parse({ canvas_id: 'zzzz999999' });
     await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'canvas_not_found' },
     });
@@ -105,15 +105,10 @@ describe('dataframeDescribe', () => {
     expect(mockCanvas.acquire).not.toHaveBeenCalled();
   });
 
-  it('throws canvas_id_required for a blank canvas_id when canvas is enabled', async () => {
-    const mockCanvas = { acquire: vi.fn() };
-    const ctx = createMockContext({ errors: dataframeDescribe.errors });
-    setCanvas(mockCanvas as unknown as DataCanvas);
-
-    const input = dataframeDescribe.input.parse({ canvas_id: '   ' });
-    await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'canvas_id_required' },
-    });
-    expect(mockCanvas.acquire).not.toHaveBeenCalled();
+  it('rejects a canvas_id that cannot be a minted token at argument validation', () => {
+    // CanvasIdSchema puts the minted `^[A-Za-z0-9_-]{10}$` shape in inputSchema,
+    // so a blank or wrong-length token never reaches the handler.
+    expect(() => dataframeDescribe.input.parse({ canvas_id: '   ' })).toThrow();
+    expect(() => dataframeDescribe.input.parse({ canvas_id: 'xxxx-invalid' })).toThrow();
   });
 });

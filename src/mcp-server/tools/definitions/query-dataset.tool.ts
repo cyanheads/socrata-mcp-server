@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
@@ -74,12 +75,9 @@ export const queryDataset = tool('socrata_query_dataset', {
       .default(100)
       .describe('Max rows to return (1–5000). Default 100. Use with offset for pagination.'),
     offset: z.number().int().min(0).default(0).describe('Row offset for pagination. Default 0.'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Optional 10-char DataCanvas token from a prior call. Omit on first call when CANVAS_PROVIDER_TYPE=duckdb to mint a fresh canvas. Large result sets spill here automatically.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Optional 10-char DataCanvas token from a prior socrata_query_dataset or socrata_dataframe_describe call. Omit on first call when CANVAS_PROVIDER_TYPE=duckdb to mint a fresh canvas. Large result sets spill here automatically.',
+    ),
   }),
   output: z.object({
     rows: z
@@ -240,10 +238,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     const canvas = getCanvas();
     if (canvas && qResult.rowCount >= input.limit) {
       try {
-        const instance = await canvas.acquire(
-          input.canvas_id?.trim() ? input.canvas_id : undefined,
-          ctx,
-        );
+        const instance = await canvas.acquire(input.canvas_id, ctx);
         const tableName = `${input.dataset_id.replaceAll('-', '_')}_rows`;
         // Stage the wider matching set, not just this page: drain paginated SODA
         // calls up to the safety cap. The inline `rows` above stay bounded by
