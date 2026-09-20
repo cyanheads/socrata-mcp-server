@@ -4,8 +4,8 @@
     "args": ["-y", "@cyanheads/socrata-mcp-server"],
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio",
-      "SOCRATA_APP_TOKEN": "",
       "SOCRATA_DEFAULT_DOMAIN": "data.seattle.gov"
-    }
+    },
+    "env_vars": ["SOCRATA_APP_TOKEN"]
   }
 }
