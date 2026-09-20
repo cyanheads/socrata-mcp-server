@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-09-20
+
+mcp-ts-core ^0.13.6: canvas_id is validated as a minted token at the argument level, tool errors close with a reason/retryable suffix, and Socrata HTTP errors drop the request URL from client-facing data. The dev skill tree moves to framework-skills/.
+
 ## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-08-22
 
 MCP SDK v2 compatibility, explicit stateless HTTP serving, resource response schemas, and mcp-ts-core ^0.12.3
