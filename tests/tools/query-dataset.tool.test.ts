@@ -5,7 +5,11 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryDataset } from '@/mcp-server/tools/definitions/query-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -321,6 +325,291 @@ describe('queryDataset', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toBeDefined();
     expect(enrichment.notice).toContain('No rows returned');
+  });
+
+  describe('spill discovery: table_name and the truncation notice (#30)', () => {
+    /** Wire a canvas whose registerTable resolves with the given table name and row count. */
+    function spillCanvas(tableName: string, rowCount: number) {
+      const registerTable = vi.fn().mockResolvedValue({ tableName, rowCount, columns: [] });
+      setCanvas({
+        acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas1234', registerTable }),
+      } as unknown as DataCanvas);
+      return registerTable;
+    }
+
+    /** A query result whose page fills `limit`. */
+    function fullPage(limit: number, totalCount?: number) {
+      mockQueryDataset.mockResolvedValue({
+        rows: Array.from({ length: limit }, (_, i) => ({ id: String(i) })),
+        rowCount: limit,
+        domain: 'data.seattle.gov',
+        ...(totalCount != null ? { totalCount } : {}),
+        assembledQuery: `$limit=${limit}`,
+      });
+      mockStreamDatasetRows.mockImplementation(() =>
+        streamOf(Array.from({ length: 40 }, (_, i) => ({ id: String(i) }))),
+      );
+    }
+
+    it('returns the registered table name and names it plus both dataframe tools in the notice', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      fullPage(5, 2183186);
+      spillCanvas('tazs_3rd5_rows', 40);
+
+      const result = await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'tazs-3rd5', limit: 5 }),
+        ctx,
+      );
+
+      expect(result.table_name).toBe('tazs_3rd5_rows');
+      expect(result.canvas_id).toBe('canvas1234');
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment).toMatchObject({ truncated: true, shown: 5, cap: 5 });
+      expect(enrichment.notice).toBe(
+        'Rows filled the limit — more rows may match (exact count in total_count). Staged 40 rows as table "tazs_3rd5_rows" on canvas canvas1234: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. The staged copy stops at 50,000 rows; page with offset for rows beyond it.',
+      );
+      expect(String(enrichment.notice)).not.toContain('CANVAS_PROVIDER_TYPE');
+    });
+
+    it('drops the exact-count clause from the spilled notice when total_count is absent', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      fullPage(5);
+      spillCanvas('tazs_3rd5_rows', 40);
+
+      await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'tazs-3rd5', limit: 5 }),
+        ctx,
+      );
+
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).toMatch(/^Rows filled the limit — more rows may match\. Staged 40 rows/);
+      expect(notice).not.toContain('total_count');
+    });
+
+    it('limit 1 on a large match returns one inline row with the staged copy', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      fullPage(1, 1137734);
+      spillCanvas('tazs_3rd5_rows', 40);
+
+      const result = await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'tazs-3rd5', limit: 1 }),
+        ctx,
+      );
+
+      expect(result.rows).toHaveLength(1);
+      expect(result).toMatchObject({
+        canvas_id: 'canvas1234',
+        canvas_row_count: 40,
+        table_name: 'tazs_3rd5_rows',
+      });
+    });
+
+    it('with the canvas disabled: no table_name, no canvas_id, and the notice names neither dataframe tool', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      fullPage(5, 2183186);
+
+      const result = await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'tazs-3rd5', limit: 5 }),
+        ctx,
+      );
+
+      expect(result.table_name).toBeUndefined();
+      expect(result.canvas_id).toBeUndefined();
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment).toMatchObject({ truncated: true, shown: 5, cap: 5 });
+      expect(enrichment.notice).toBe(
+        'Rows filled the limit — more rows may match (exact count in total_count). Page with offset or raise limit (max 5000).',
+      );
+      expect(String(enrichment.notice)).not.toMatch(/socrata_dataframe_|CANVAS_PROVIDER_TYPE/);
+    });
+
+    it('when the spill fails: no table_name, no canvas_id, and the notice names neither dataframe tool', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      fullPage(5);
+      spillCanvas('tazs_3rd5_rows', 40).mockRejectedValue(new Error('DuckDB out of memory'));
+
+      const result = await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'tazs-3rd5', limit: 5 }),
+        ctx,
+      );
+
+      expect(result.table_name).toBeUndefined();
+      expect(result.canvas_id).toBeUndefined();
+      expect(getEnrichment(ctx).notice).toBe(
+        'Rows filled the limit — more rows may match. Page with offset or raise limit (max 5000).',
+      );
+    });
+
+    it('a result under the limit carries no table_name and no truncation notice', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      mockQueryDataset.mockResolvedValue({
+        rows: [{ id: '1' }],
+        rowCount: 1,
+        domain: 'data.seattle.gov',
+        assembledQuery: '$limit=5',
+      });
+      const registerTable = spillCanvas('tazs_3rd5_rows', 1);
+
+      const result = await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'tazs-3rd5', limit: 5 }),
+        ctx,
+      );
+
+      expect(registerTable).not.toHaveBeenCalled();
+      expect(result.table_name).toBeUndefined();
+      expect(getEnrichment(ctx).notice).toBeUndefined();
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
+    });
+
+    it('format names table_name and both dataframe tools on the canvas line', () => {
+      const blocks = queryDataset.format!({
+        rows: [{ id: '1' }],
+        row_count: 1,
+        assembled_query: '$limit=1',
+        domain: 'data.seattle.gov',
+        dataset_id: 'tazs-3rd5',
+        canvas_id: 'canvas1234',
+        canvas_row_count: 40,
+        table_name: 'tazs_3rd5_rows',
+      });
+      const text = (blocks[0] as { text?: string }).text ?? '';
+      const canvasLine = text.split('\n').find((l) => l.startsWith('**Canvas ID:**')) ?? '';
+
+      expect(canvasLine).toContain('canvas1234');
+      expect(canvasLine).toContain('`tazs_3rd5_rows`');
+      expect(canvasLine).toContain('40 rows');
+      expect(canvasLine).toContain('socrata_dataframe_describe');
+      expect(canvasLine).toContain('socrata_dataframe_query');
+    });
+
+    it('tells callers in the description and the limit describe that a small limit still stages the copy', () => {
+      expect(queryDataset.description).toContain(
+        'When CANVAS_PROVIDER_TYPE=duckdb and rows fill limit, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.',
+      );
+      expect(queryDataset.input.shape.limit.description).toContain(
+        'pass a small limit (e.g. 10) to stage a large match without a large inline page',
+      );
+      expect(queryDataset.output.shape.table_name.description).toContain('socrata_dataframe_query');
+    });
+  });
+
+  describe('typed spill schema from the SODA field-type headers (#25)', () => {
+    /** Spill `staged` rows with the given header field types; return the options registerTable saw. */
+    async function spillWith(
+      staged: Record<string, unknown>[],
+      fieldTypes: Map<string, string> | undefined,
+      ctx = createMockContext({ errors: queryDataset.errors }),
+    ) {
+      mockQueryDataset.mockResolvedValue({
+        rows: staged.slice(0, 2),
+        rowCount: 2,
+        domain: 'data.cityofchicago.org',
+        assembledQuery: '$limit=2',
+        ...(fieldTypes ? { fieldTypes } : {}),
+      });
+      mockStreamDatasetRows.mockImplementation(() => streamOf(staged));
+      const registerTable = vi
+        .fn()
+        .mockResolvedValue({ tableName: 'ijzp_q8t2_rows', rowCount: staged.length, columns: [] });
+      setCanvas({
+        acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas1234', registerTable }),
+      } as unknown as DataCanvas);
+
+      const result = await queryDataset.handler(
+        queryDataset.input.parse({ dataset_id: 'ijzp-q8t2', limit: 2 }),
+        ctx,
+      );
+      return { result, registerTable, options: registerTable.mock.calls[0]?.[2] };
+    }
+
+    it('registers SODA number columns and number-typed aggregate aliases as DOUBLE, others as inferred', async () => {
+      const staged = [
+        {
+          id: '1',
+          primary_type: 'HOMICIDE',
+          year: '2025',
+          date: '2025-01-02T03:04:05.000',
+          arrest: true,
+          n: '7',
+        },
+        {
+          id: '2',
+          primary_type: 'HOMICIDE',
+          year: '2025',
+          date: '2025-01-03T00:00:00.000',
+          arrest: false,
+          n: '3',
+        },
+      ];
+      const { options, registerTable } = await spillWith(
+        staged,
+        new Map([
+          ['id', 'number'],
+          ['primary_type', 'text'],
+          ['year', 'number'],
+          ['date', 'floating_timestamp'],
+          ['arrest', 'boolean'],
+          ['n', 'number'],
+        ]),
+      );
+
+      expect(options?.schema).toEqual([
+        { name: 'id', type: 'DOUBLE', nullable: true },
+        { name: 'primary_type', type: 'VARCHAR', nullable: true },
+        { name: 'year', type: 'DOUBLE', nullable: true },
+        { name: 'date', type: 'VARCHAR', nullable: true },
+        { name: 'arrest', type: 'BOOLEAN', nullable: true },
+        { name: 'n', type: 'DOUBLE', nullable: true },
+      ]);
+      // Row payload is untouched: SODA strings go to the canvas as-is.
+      expect(registerTable.mock.calls[0]?.[1]).toEqual(staged);
+    });
+
+    it('adds a header field absent from every staged row, and skips `:`-prefixed system fields', async () => {
+      const { options } = await spillWith(
+        [{ id: '1' }, { id: '2' }],
+        new Map([
+          ['id', 'number'],
+          ['latitude', 'number'],
+          [':@computed_region_awaf_s7ux', 'number'],
+        ]),
+      );
+
+      expect(options?.schema).toEqual([
+        { name: 'id', type: 'DOUBLE', nullable: true },
+        { name: 'latitude', type: 'DOUBLE', nullable: true },
+      ]);
+    });
+
+    it('infers columns over every staged row, not a 100-row sniff', async () => {
+      const staged = Array.from({ length: 150 }, (_, i) => ({
+        id: String(i),
+        ...(i === 140 ? { latitude: '41.8' } : {}),
+      }));
+      const { options } = await spillWith(staged, new Map([['id', 'number']]));
+
+      expect(options?.schema?.map((c: { name: string }) => c.name)).toEqual(['id', 'latitude']);
+    });
+
+    it('falls back to inferred types with a warning when the headers are missing', async () => {
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      const { result, options } = await spillWith(
+        [
+          { id: '1', year: '2025' },
+          { id: '2', year: '2024' },
+        ],
+        undefined,
+        ctx,
+      );
+
+      expect(options?.schema).toEqual([
+        { name: 'id', type: 'VARCHAR', nullable: true },
+        { name: 'year', type: 'VARCHAR', nullable: true },
+      ]);
+      expect(result.canvas_id).toBe('canvas1234');
+      const log = ctx.log as MockContextLogger;
+      expect(log.calls.some((c) => c.level === 'warning' && /X-SODA2/.test(c.msg))).toBe(true);
+    });
   });
 
   it('format shows canvas_id when spilled to canvas', () => {

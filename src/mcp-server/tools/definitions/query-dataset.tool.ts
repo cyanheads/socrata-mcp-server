@@ -4,7 +4,11 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
+import {
+  CanvasIdSchema,
+  type ColumnSchema,
+  inferSchemaFromRows,
+} from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { escapeTableCell, fencedJson, inlineUpstream } from '@/mcp-server/tools/upstream-text.js';
@@ -21,6 +25,31 @@ import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
  * result set" when total_count exceeds this cap.
  */
 const CANVAS_SPILL_MAX_ROWS = 50_000;
+
+/**
+ * Explicit schema for a spilled table. Columns are inferred over every staged
+ * row — SODA omits null-valued keys, so a 100-row sniff drops a column that is
+ * null that long — plus any header field no row carried (`:`-prefixed system
+ * fields excluded). SODA 2.1 sends numbers as strings, so `number` fields
+ * (aggregate aliases included) register as DOUBLE; every other column keeps its
+ * inferred type. `floating_timestamp` stays VARCHAR: the canvas appender reads
+ * offset-less ISO strings as host-local time, while `CAST(col AS TIMESTAMP)`
+ * keeps the wall-clock value. Without field types the inferred schema stands.
+ */
+function spillSchema(
+  rows: Record<string, unknown>[],
+  fieldTypes: ReadonlyMap<string, string> | undefined,
+): ColumnSchema[] {
+  const inferred = inferSchemaFromRows(rows);
+  if (!fieldTypes) return inferred;
+  const staged = new Set(inferred.map((c) => c.name));
+  const headerOnly = [...fieldTypes.keys()]
+    .filter((name) => !name.startsWith(':') && !staged.has(name))
+    .map((name): ColumnSchema => ({ name, type: 'VARCHAR', nullable: true }));
+  return [...inferred, ...headerOnly].map((c) =>
+    fieldTypes.get(c.name) === 'number' ? { ...c, type: 'DOUBLE' } : c,
+  );
+}
 
 /**
  * Recovery hint for a `soql_error`, chosen by the upstream Socrata error code:
@@ -48,7 +77,7 @@ function soqlRecoveryHint(socrataCode: unknown, column: unknown): string | undef
 export const queryDataset = tool('socrata_query_dataset', {
   title: 'Query Dataset',
   description:
-    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When CANVAS_PROVIDER_TYPE=duckdb and rows fill the limit, results spill to a DataCanvas table for SQL-based analysis.',
+    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When CANVAS_PROVIDER_TYPE=duckdb and rows fill limit, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     domain: z
@@ -102,7 +131,9 @@ export const queryDataset = tool('socrata_query_dataset', {
       .min(1)
       .max(5000)
       .default(100)
-      .describe('Max rows to return (1–5000). Default 100. Use with offset for pagination.'),
+      .describe(
+        'Max rows to return (1–5000). Default 100. Use with offset for pagination. When the canvas is enabled and the page fills limit, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.',
+      ),
     offset: z.number().int().min(0).default(0).describe('Row offset for pagination. Default 0.'),
     canvas_id: CanvasIdSchema.optional().describe(
       'Optional 10-char DataCanvas token from a prior socrata_query_dataset or socrata_dataframe_describe call. Omit on first call when CANVAS_PROVIDER_TYPE=duckdb to mint a fresh canvas. Large result sets spill here automatically.',
@@ -130,13 +161,19 @@ export const queryDataset = tool('socrata_query_dataset', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token when results spilled (requires CANVAS_PROVIDER_TYPE=duckdb). Pass to socrata_dataframe_query to run SQL over the staged rows — a bounded copy of the matching set (up to 50,000 rows, reported in canvas_row_count), not the full set when total_count exceeds that cap. Page with offset to reach rows beyond it.',
+        'DataCanvas token when results spilled (requires CANVAS_PROVIDER_TYPE=duckdb). Pass to socrata_dataframe_query to run SQL over the staged rows in table_name — a bounded copy of the matching set (up to 50,000 rows, reported in canvas_row_count), not the full set when total_count exceeds that cap. Page with offset to reach rows beyond it.',
       ),
     canvas_row_count: z
       .number()
       .optional()
       .describe(
         'Rows staged onto the DataCanvas — a bounded copy of the matching result set (capped at 50,000). Fewer than total_count when the match exceeds the cap. Present only when canvas_id is.',
+      ),
+    table_name: z
+      .string()
+      .optional()
+      .describe(
+        'Canvas table holding the staged rows; present when canvas_id is. Use it as the FROM target in socrata_dataframe_query SQL; list its columns with socrata_dataframe_describe.',
       ),
   }),
 
@@ -147,13 +184,13 @@ export const queryDataset = tool('socrata_query_dataset', {
       .string()
       .optional()
       .describe(
-        'Guidance when the query returned zero rows — suggests narrowing or reviewing the SoQL. Absent on non-empty result sets.',
+        'Guidance when the query returned zero rows (review the SoQL or broaden the filter), or when rows filled the limit (how to page, and the staged table to query when the result spilled). Absent otherwise.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when rows filled the limit — more rows may match (see total_count when present). Spills to canvas when enabled.',
+        'True when rows filled the limit — more rows may match (see total_count when present). Spills to canvas when enabled; table_name names the staged table.',
       ),
     shown: z.number().optional().describe('Rows returned in this response when capped.'),
     cap: z.number().optional().describe('The row limit that was applied when capped.'),
@@ -283,21 +320,13 @@ export const queryDataset = tool('socrata_query_dataset', {
         `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${where}` : ''}. ` +
           'Check field names and quoting with socrata_get_dataset, or broaden the filter.',
       );
-    } else if (qResult.rowCount >= input.limit) {
-      // Only claim an exact count when the recount actually produced one —
-      // total_count is absent for grouped queries and when the recount failed.
-      ctx.enrich.truncated({
-        shown: qResult.rowCount,
-        cap: input.limit,
-        guidance: `Rows filled the limit — more rows may match${qResult.totalCount != null ? ' (exact count in total_count)' : ''}. Page with offset, raise limit (max 5000), or query the spilled canvas via socrata_dataframe_query when CANVAS_PROVIDER_TYPE=duckdb (the staged copy is bounded to ${CANVAS_SPILL_MAX_ROWS.toLocaleString()} rows).`,
-      });
     }
 
     // Attempt DataCanvas spillover when canvas is available and result hit the limit.
-    let canvasId: string | undefined;
-    let canvasRowCount: number | undefined;
+    const filled = qResult.rowCount >= input.limit;
+    let spill: { canvasId: string; rowCount: number; tableName: string } | undefined;
     const canvas = getCanvas();
-    if (canvas && qResult.rowCount >= input.limit) {
+    if (canvas && filled) {
       try {
         const instance = await canvas.acquire(input.canvas_id, ctx);
         const tableName = `${input.dataset_id.replaceAll('-', '_')}_rows`;
@@ -330,18 +359,39 @@ export const queryDataset = tool('socrata_query_dataset', {
               : row,
           );
         }
-        const registered = await instance.registerTable(tableName, canvasRows);
-        canvasId = instance.canvasId;
-        canvasRowCount = registered.rowCount ?? canvasRows.length;
-        ctx.log.info('Spilled query result to DataCanvas', {
-          canvasId,
-          tableName,
-          rowCount: canvasRowCount,
+        if (!qResult.fieldTypes) {
+          ctx.log.warning(
+            'SODA X-SODA2-Fields/X-SODA2-Types headers missing or malformed — spilled table uses inferred column types',
+            { datasetId: input.dataset_id, tableName },
+          );
+        }
+        const registered = await instance.registerTable(tableName, canvasRows, {
+          schema: spillSchema(canvasRows, qResult.fieldTypes),
         });
+        spill = {
+          canvasId: instance.canvasId,
+          rowCount: registered.rowCount,
+          tableName: registered.tableName,
+        };
+        ctx.log.info('Spilled query result to DataCanvas', spill);
       } catch (err) {
         // Canvas is best-effort — log but don't fail the query.
         ctx.log.warning('DataCanvas spillover failed', { error: String(err) });
       }
+    }
+
+    if (filled) {
+      // One call: truncated() writes `notice`, which is last-wins. Only claim an
+      // exact count when the recount produced one — total_count is absent for
+      // grouped queries and when the recount failed.
+      const more = `Rows filled the limit — more rows may match${qResult.totalCount != null ? ' (exact count in total_count)' : ''}.`;
+      ctx.enrich.truncated({
+        shown: qResult.rowCount,
+        cap: input.limit,
+        guidance: spill
+          ? `${more} Staged ${spill.rowCount.toLocaleString()} rows as table "${spill.tableName}" on canvas ${spill.canvasId}: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. The staged copy stops at ${CANVAS_SPILL_MAX_ROWS.toLocaleString()} rows; page with offset for rows beyond it.`
+          : `${more} Page with offset or raise limit (max 5000).`,
+      });
     }
 
     return {
@@ -351,8 +401,13 @@ export const queryDataset = tool('socrata_query_dataset', {
       assembled_query: qResult.assembledQuery,
       domain: qResult.domain,
       dataset_id: input.dataset_id,
-      ...(canvasId ? { canvas_id: canvasId } : {}),
-      ...(canvasRowCount != null ? { canvas_row_count: canvasRowCount } : {}),
+      ...(spill
+        ? {
+            canvas_id: spill.canvasId,
+            canvas_row_count: spill.rowCount,
+            table_name: spill.tableName,
+          }
+        : {}),
     };
   },
 
@@ -370,8 +425,9 @@ export const queryDataset = tool('socrata_query_dataset', {
         result.canvas_row_count != null
           ? `${result.canvas_row_count.toLocaleString()} rows staged`
           : 'rows staged';
+      const table = result.table_name ? ` as table \`${result.table_name}\`` : '';
       lines.push(
-        `**Canvas ID:** ${result.canvas_id} — ${staged} for SQL via socrata_dataframe_query (bounded copy, up to ${CANVAS_SPILL_MAX_ROWS.toLocaleString()} rows; page with offset for any beyond the cap)`,
+        `**Canvas ID:** ${result.canvas_id} — ${staged}${table}; list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query (bounded copy, up to ${CANVAS_SPILL_MAX_ROWS.toLocaleString()} rows; page with offset for any beyond the cap)`,
       );
     }
 

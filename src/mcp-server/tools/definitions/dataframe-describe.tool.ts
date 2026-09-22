@@ -12,7 +12,11 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 const ColumnInfoSchema = z
   .object({
     name: z.string().describe('Column name.'),
-    type: z.string().describe('DuckDB inferred type (e.g. VARCHAR, DOUBLE, BIGINT).'),
+    type: z
+      .string()
+      .describe(
+        'DuckDB column type (e.g. VARCHAR, DOUBLE, BOOLEAN, JSON). SODA number columns are DOUBLE; text and timestamp columns are VARCHAR.',
+      ),
   })
   .describe('Column name and DuckDB type.');
 
@@ -23,7 +27,7 @@ const TableInfoSchema = z
     columns: z
       .array(ColumnInfoSchema)
       .describe(
-        'Column names and DuckDB types. Numeric SODA columns become queryable with numeric comparisons after spillover.',
+        'Column names and DuckDB types. SODA number columns are staged as DOUBLE, so numeric comparisons (year > 2020) need no cast; compare timestamps with CAST(col AS TIMESTAMP).',
       ),
   })
   .describe('A registered DataCanvas table.');
