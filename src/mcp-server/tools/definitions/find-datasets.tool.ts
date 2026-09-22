@@ -23,7 +23,7 @@ const DatasetResultSchema = z
     column_names: z
       .array(z.string())
       .describe(
-        'Preview column name list (no type info). Call socrata_get_dataset for typed schema.',
+        'API field names — the identifiers SoQL takes in select/where/group/order (e.g. cuisine_description), not display labels. Computed-region system columns are dropped; empty when the catalog lists no field names. No type info — call socrata_get_dataset for the typed schema.',
       ),
     license: z.string().optional().describe('Dataset license when available.'),
     data_updated_at: z
@@ -37,7 +37,7 @@ const DatasetResultSchema = z
 export const findDatasets = tool('socrata_find_datasets', {
   title: 'Find Socrata Datasets',
   description:
-    'Search for datasets across all Socrata-powered government open-data portals, or scope to one portal with the domain parameter. Returns dataset IDs, names, abbreviated column lists, domains, and update timestamps. Use socrata_get_dataset to fetch the full typed column schema before writing queries — columnNames here are preview-only and lack type information.',
+    'Search for datasets across all Socrata-powered government open-data portals, or scope to one portal with the domain parameter. Returns dataset IDs, names, domains, update timestamps, and column_names — the API field names SoQL takes, not display labels. Use socrata_get_dataset to fetch the typed column schema before writing queries — column_names carry no type information.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -50,7 +50,7 @@ export const findDatasets = tool('socrata_find_datasets', {
       .string()
       .optional()
       .describe(
-        'Scope search to a single portal (e.g. data.seattle.gov, data.cityofnewyork.us). Omit to search all portals.',
+        'Scope search to a single portal by bare hostname (e.g. data.seattle.gov, data.cityofnewyork.us); URL forms like https://data.seattle.gov/ are accepted and reduced to the host. Omit to search all portals.',
       ),
     categories: z
       .array(z.string())
@@ -103,6 +103,20 @@ export const findDatasets = tool('socrata_find_datasets', {
       retryable: true,
       recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
     },
+    {
+      reason: 'unknown_domain',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The Discovery catalog does not index the domain ("Domain not found").',
+      recovery:
+        'The domain is not a Socrata portal the catalog knows. Pass a bare portal hostname such as data.cityofnewyork.us, pick one from socrata_list_portals, or omit domain to search every indexed portal.',
+    },
+    {
+      reason: 'invalid_domain',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The domain is not a hostname, even after dropping a URL scheme, path, or query.',
+      recovery:
+        'Pass a bare portal hostname such as data.cityofnewyork.us, or pick one from socrata_list_portals.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -136,12 +150,19 @@ export const findDatasets = tool('socrata_find_datasets', {
       // Re-throw service failures that map to declared contract reasons via
       // ctx.fail so the contract recovery hint reaches the wire.
       if (err instanceof McpError) {
-        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
-        if (reason === 'rate_limited') {
-          throw ctx.fail(reason, err.message, {
-            ...(err.data as Record<string, unknown>),
-            ...ctx.recoveryFor(reason),
-          });
+        const data = (err.data ?? {}) as Record<string, unknown>;
+        const { reason } = data;
+        if (
+          reason === 'rate_limited' ||
+          reason === 'unknown_domain' ||
+          reason === 'invalid_domain'
+        ) {
+          throw ctx.fail(
+            reason,
+            err.message,
+            { ...data, ...ctx.recoveryFor(reason) },
+            { cause: err },
+          );
         }
       }
       throw err;
@@ -205,7 +226,7 @@ export const findDatasets = tool('socrata_find_datasets', {
       if (ds.column_names.length) {
         // Render the full column list structuredContent carries — a render-only
         // slice here would drop names content[]-reading clients can't recover.
-        lines.push(`**Columns (preview):** ${ds.column_names.join(', ')}`);
+        lines.push(`**Columns (field names):** ${ds.column_names.join(', ')}`);
       }
       if (ds.data_updated_at != null) lines.push(`**Last updated:** ${ds.data_updated_at}`);
       if (ds.view_count != null) lines.push(`**Views:** ${ds.view_count}`);

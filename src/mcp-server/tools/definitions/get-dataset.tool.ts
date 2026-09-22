@@ -26,12 +26,12 @@ export const getDataset = tool('socrata_get_dataset', {
       .string()
       .optional()
       .describe(
-        'Portal domain (e.g. data.seattle.gov). Defaults to SOCRATA_DEFAULT_DOMAIN env var or data.seattle.gov.',
+        'Portal the dataset lives on, as a bare hostname (e.g. data.cityofnewyork.us); URL forms like https://data.cityofnewyork.us/ are accepted and reduced to the host. Pass the domain from the same socrata_find_datasets result as dataset_id. Defaults to SOCRATA_DEFAULT_DOMAIN or data.seattle.gov, which is wrong for another portal’s ID.',
       ),
     dataset_id: z
       .string()
       .describe(
-        'Four-by-four dataset ID matching pattern like kzjm-xkqj. Obtain from socrata_find_datasets.',
+        'Four-by-four dataset ID matching pattern like kzjm-xkqj. IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
       ),
   }),
   output: z.object({
@@ -90,9 +90,30 @@ export const getDataset = tool('socrata_get_dataset', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Valid ID format but dataset does not exist on this domain.',
+      when: 'Valid ID format but the dataset does not exist on the domain queried — including a gateway HTTP 403 for an ID the portal does not serve.',
       recovery:
-        'Use socrata_find_datasets to search again — the dataset may have been retired or replaced.',
+        'The ID may belong to a different portal — retry with the domain from the same socrata_find_datasets result, or search again with socrata_find_datasets; the dataset may also have been retired.',
+    },
+    {
+      reason: 'unknown_domain',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The domain does not serve the Socrata API to this server: its hostname does not resolve (DNS ENOTFOUND), its API answered HTTP 404 without a Socrata error body, it redirected the request to another host that did not answer with Socrata data, or a gateway refused a dataset the Discovery catalog lists there.',
+      recovery:
+        'The domain is not serving the Socrata API. Check the hostname for typos and pass a bare portal hostname such as data.cityofnewyork.us, or pick one from socrata_list_portals.',
+    },
+    {
+      reason: 'invalid_domain',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The domain is not a hostname, even after dropping a URL scheme, path, or query.',
+      recovery:
+        'Pass a bare portal hostname such as data.cityofnewyork.us, or pick one from socrata_list_portals.',
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'SODA endpoint returned 429.',
+      retryable: true,
+      recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
     },
   ],
 
@@ -115,14 +136,28 @@ export const getDataset = tool('socrata_get_dataset', {
       meta = await svc.getDataset(domain, input.dataset_id, ctx);
     } catch (err) {
       // Re-throw service failures that map to declared contract reasons via
-      // ctx.fail so the contract recovery hint reaches the wire.
+      // ctx.fail so a recovery hint reaches the wire. A not_found whose ID the
+      // Discovery catalog places on another portal names that portal instead
+      // of the static hint.
       if (err instanceof McpError) {
-        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
-        if (reason === 'not_found') {
-          throw ctx.fail(reason, err.message, {
-            ...(err.data as Record<string, unknown>),
-            ...ctx.recoveryFor(reason),
-          });
+        const data = (err.data ?? {}) as Record<string, unknown>;
+        const { reason, found_on_domain: foundOn } = data;
+        if (
+          reason === 'not_found' ||
+          reason === 'unknown_domain' ||
+          reason === 'invalid_domain' ||
+          reason === 'rate_limited'
+        ) {
+          const hint =
+            reason === 'not_found' && typeof foundOn === 'string'
+              ? `${input.dataset_id} is on ${foundOn} — retry with domain "${foundOn}".`
+              : undefined;
+          throw ctx.fail(
+            reason,
+            err.message,
+            { ...data, ...(hint ? { recovery: { hint } } : ctx.recoveryFor(reason)) },
+            { cause: err },
+          );
         }
       }
       throw err;

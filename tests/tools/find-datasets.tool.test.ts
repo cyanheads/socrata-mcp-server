@@ -144,6 +144,15 @@ describe('findDatasets', () => {
     expect(text).toContain('kzjm-xkqj');
     expect(text).toContain('Seattle 911 Incidents');
     expect(text).toContain('data.seattle.gov');
+    expect(text).toContain('**Columns (field names):** incident_type, date');
+  });
+
+  it('describes column_names as SoQL field names, not labels or a preview (#29)', () => {
+    const describe = findDatasets.output.shape.results.element.shape.column_names.description ?? '';
+    expect(describe).toContain('API field names');
+    expect(describe).not.toMatch(/preview/i);
+    expect(findDatasets.description).toContain('column_names');
+    expect(findDatasets.description).not.toContain('columnNames');
   });
 
   it('formats empty results as empty text', () => {

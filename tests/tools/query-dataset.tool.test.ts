@@ -43,6 +43,17 @@ afterEach(() => {
 });
 
 describe('queryDataset', () => {
+  it('states that SoQL takes the API field name in the description and clause describes (#29)', () => {
+    expect(queryDataset.description).toContain('API field name');
+    const { shape } = queryDataset.input;
+    for (const clause of [shape.select, shape.where, shape.group, shape.order]) {
+      expect(clause.description).toMatch(/field names?/);
+    }
+    expect(queryDataset.errors?.find((e) => e.reason === 'soql_error')?.recovery).toContain(
+      'field_name',
+    );
+  });
+
   it('throws invalid_id for malformed dataset ID', async () => {
     const ctx = createMockContext({ errors: queryDataset.errors });
 
@@ -57,6 +68,7 @@ describe('queryDataset', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [{ incident_type: 'Theft', year: '2023' }],
       rowCount: 1,
+      domain: 'data.seattle.gov',
       assembledQuery: '$where=year=2023 $limit=100',
     });
 
@@ -78,6 +90,7 @@ describe('queryDataset', () => {
     mockQueryDataset.mockResolvedValue({
       rows: Array.from({ length: 100 }, (_, i) => ({ id: String(i) })),
       rowCount: 100,
+      domain: 'data.seattle.gov',
       totalCount: 5000,
       assembledQuery: '$limit=100',
     });
@@ -97,6 +110,7 @@ describe('queryDataset', () => {
     mockQueryDataset.mockResolvedValue({
       rows: Array.from({ length: 5 }, (_, i) => ({ primary_type: `TYPE_${i}`, n: String(i) })),
       rowCount: 5,
+      domain: 'data.seattle.gov',
       assembledQuery: '$select=primary_type, count(*) as n $group=primary_type $limit=5',
     });
 
@@ -124,7 +138,12 @@ describe('queryDataset', () => {
       ...(i % 2 === 0 ? { ':@computed_region_awaf_s7ux': String(40 + i) } : {}),
     }));
     // Inline page keeps system columns; the paginated drain feeds the canvas.
-    mockQueryDataset.mockResolvedValue({ rows, rowCount: 5, assembledQuery: '$limit=5' });
+    mockQueryDataset.mockResolvedValue({
+      rows,
+      rowCount: 5,
+      domain: 'data.seattle.gov',
+      assembledQuery: '$limit=5',
+    });
     mockStreamDatasetRows.mockImplementation(() => streamOf(rows));
     const registerTable = vi.fn().mockResolvedValue({ tableName: 'ijzp_q8t2_rows', rowCount: 5 });
     const mockCanvas = {
@@ -155,6 +174,7 @@ describe('queryDataset', () => {
     mockQueryDataset.mockResolvedValue({
       rows: Array.from({ length: 5 }, (_, i) => ({ id: String(i) })),
       rowCount: 5,
+      domain: 'data.seattle.gov',
       totalCount: 2183186,
       assembledQuery: '$limit=5',
     });
@@ -234,6 +254,7 @@ describe('queryDataset', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [],
       rowCount: 0,
+      domain: 'data.seattle.gov',
       assembledQuery: '$select=category,count(*) $group=category $order=n DESC $limit=50',
     });
 
@@ -289,6 +310,7 @@ describe('queryDataset', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [],
       rowCount: 0,
+      domain: 'data.seattle.gov',
       assembledQuery: '$where=year=9999 $limit=100',
     });
 

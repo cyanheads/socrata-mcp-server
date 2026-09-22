@@ -173,8 +173,13 @@ describe('error contract propagation', () => {
     );
     const ctx = createMockContext({ errors: getDataset.errors });
     const input = getDataset.input.parse({ dataset_id: 'kzjm-xkqj' });
+    // The reason arrives pre-set from the service; the handler's rewrap is what
+    // attaches the recovery hint, so assert the hint, not just the reason.
     await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      data: {
+        reason: 'not_found',
+        recovery: { hint: expect.stringContaining('different portal') },
+      },
     });
   });
 
@@ -186,7 +191,88 @@ describe('error contract propagation', () => {
     const ctx = createMockContext({ errors: queryDataset.errors });
     const input = queryDataset.input.parse({ dataset_id: 'kzjm-xkqj' });
     await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      data: {
+        reason: 'not_found',
+        recovery: { hint: expect.stringContaining('different portal') },
+      },
+    });
+  });
+
+  it.each([
+    ['getDataset', getDataset, mockGetDataset],
+    ['queryDataset', queryDataset, mockQueryDataset],
+  ] as const)(
+    '%s names the holding portal in the hint when the service found one',
+    async (_n, def, mock) => {
+      const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+      mock.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.NotFound,
+          'Dataset erm2-nwe9 not found on data.seattle.gov.',
+          {
+            reason: 'not_found',
+            domain: 'data.seattle.gov',
+            dataset_id: 'erm2-nwe9',
+            found_on_domain: 'data.cityofnewyork.us',
+          },
+        ),
+      );
+      const ctx = createMockContext({ errors: def.errors });
+      const input = getDataset.input.parse({ dataset_id: 'erm2-nwe9' });
+      await expect((def as typeof getDataset).handler(input, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          domain: 'data.seattle.gov',
+          dataset_id: 'erm2-nwe9',
+          recovery: {
+            hint: 'erm2-nwe9 is on data.cityofnewyork.us — retry with domain "data.cityofnewyork.us".',
+          },
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['findDatasets', 'unknown_domain', 'socrata_list_portals'],
+    ['findDatasets', 'invalid_domain', 'socrata_list_portals'],
+    ['findDatasets', 'rate_limited', 'SOCRATA_APP_TOKEN'],
+    ['getDataset', 'unknown_domain', 'socrata_list_portals'],
+    ['getDataset', 'invalid_domain', 'socrata_list_portals'],
+    ['getDataset', 'rate_limited', 'SOCRATA_APP_TOKEN'],
+    ['queryDataset', 'unknown_domain', 'socrata_list_portals'],
+    ['queryDataset', 'invalid_domain', 'socrata_list_portals'],
+    ['queryDataset', 'rate_limited', 'SOCRATA_APP_TOKEN'],
+    // No socrataCode → the declared generic soql_error recovery.
+    ['queryDataset', 'soql_error', 'field_name'],
+  ] as const)('%s attaches the declared %s recovery hint', async (tool, reason, hintFragment) => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const upstream = new McpError(JsonRpcErrorCode.NotFound, 'upstream failure', { reason });
+    let run: () => unknown;
+    if (tool === 'findDatasets') {
+      mockFindDatasets.mockRejectedValue(upstream);
+      run = () =>
+        findDatasets.handler(
+          findDatasets.input.parse({ query: 'x' }),
+          createMockContext({ errors: findDatasets.errors }),
+        );
+    } else if (tool === 'getDataset') {
+      mockGetDataset.mockRejectedValue(upstream);
+      run = () =>
+        getDataset.handler(
+          getDataset.input.parse({ dataset_id: 'kzjm-xkqj' }),
+          createMockContext({ errors: getDataset.errors }),
+        );
+    } else {
+      mockQueryDataset.mockRejectedValue(upstream);
+      run = () =>
+        queryDataset.handler(
+          queryDataset.input.parse({ dataset_id: 'kzjm-xkqj' }),
+          createMockContext({ errors: queryDataset.errors }),
+        );
+    }
+    await expect(Promise.resolve().then(run)).rejects.toMatchObject({
+      data: { reason, recovery: { hint: expect.stringContaining(hintFragment) } },
     });
   });
 
@@ -197,16 +283,15 @@ describe('error contract propagation', () => {
     await expect(queryDataset.handler(input, ctx)).rejects.toThrow('Unexpected upstream error');
   });
 
-  it('getDataset re-throws non-NotFound McpErrors unchanged', async () => {
+  it('getDataset re-throws an McpError with no declared reason unchanged', async () => {
     const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
-    mockGetDataset.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Rate limited', { reason: 'rate_limited' }),
-    );
+    const upstream = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Socrata 503', {
+      status: 503,
+    });
+    mockGetDataset.mockRejectedValue(upstream);
     const ctx = createMockContext({ errors: getDataset.errors });
     const input = getDataset.input.parse({ dataset_id: 'kzjm-xkqj' });
-    await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-    });
+    await expect(getDataset.handler(input, ctx)).rejects.toBe(upstream);
   });
 });
 
@@ -222,6 +307,7 @@ describe('SoQL injection pass-through', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [],
       rowCount: 0,
+      domain: 'data.seattle.gov',
       assembledQuery: '$where=1=1 OR 1=1',
     });
     const ctx = createMockContext({ errors: queryDataset.errors });
@@ -238,6 +324,7 @@ describe('SoQL injection pass-through', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [],
       rowCount: 0,
+      domain: 'data.seattle.gov',
       assembledQuery: '$select=*',
     });
     const ctx = createMockContext({ errors: queryDataset.errors });
@@ -280,6 +367,7 @@ describe('whitespace-only inputs', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [{ col: 'val' }],
       rowCount: 1,
+      domain: 'data.seattle.gov',
       assembledQuery: '$limit=100',
     });
     const ctx = createMockContext({ errors: queryDataset.errors });
@@ -294,6 +382,7 @@ describe('whitespace-only inputs', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [],
       rowCount: 0,
+      domain: 'data.seattle.gov',
       assembledQuery: '$limit=100',
     });
     const ctx = createMockContext({ errors: queryDataset.errors });
@@ -413,6 +502,7 @@ describe('no secret or env var leakage', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [{ col: 'value' }],
       rowCount: 1,
+      domain: 'data.seattle.gov',
       assembledQuery: '$limit=100',
     });
 
@@ -473,6 +563,7 @@ describe('empty result sets and pagination', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [{ category: 'A', n: '50' }],
       rowCount: 1,
+      domain: 'data.seattle.gov',
       assembledQuery: '$select=category,count(*) $group=category $having=count(*)>10',
     });
     const ctx = createMockContext({ errors: queryDataset.errors });
@@ -493,6 +584,7 @@ describe('empty result sets and pagination', () => {
     mockQueryDataset.mockResolvedValue({
       rows: [],
       rowCount: 0,
+      domain: 'data.seattle.gov',
       assembledQuery: '$q=bicycle $limit=100',
     });
     const ctx = createMockContext({ errors: queryDataset.errors });
@@ -758,7 +850,7 @@ describe('upstream text framing in content[]', () => {
     expect(text).toContain('### "Crimes - 2001 to Present ## Injected heading"');
     // A blank line seals the blockquote — the columns line that follows must not
     // be a lazy continuation of the quoted upstream text.
-    expect(text).toMatch(/\n\n\*\*Columns \(preview\):\*\*/);
+    expect(text).toMatch(/\n\n\*\*Columns \(field names\):\*\* id, date\n/);
   });
 
   it('queryDataset format escapes pipes and newlines in row-value table cells', () => {

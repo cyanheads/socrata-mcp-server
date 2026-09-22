@@ -7,7 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
-import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
+import { escapeTableCell, fencedJson, inlineUpstream } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 import type { QueryResult } from '@/services/socrata/types.js';
@@ -22,21 +22,46 @@ import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
  */
 const CANVAS_SPILL_MAX_ROWS = 50_000;
 
+/**
+ * Recovery hint for a `soql_error`, chosen by the upstream Socrata error code:
+ * a parse error, an unknown identifier, and a literal/column type mismatch
+ * each have a different fix. Undefined for codes without a specific fix — the
+ * caller falls back to the declared generic recovery.
+ */
+function soqlRecoveryHint(socrataCode: unknown, column: unknown): string | undefined {
+  switch (socrataCode) {
+    case 'query.compiler.malformed':
+      return 'Reference columns by API field name — field_name from socrata_get_dataset (cuisine_description, not "CUISINE DESCRIPTION"); a display label containing a space does not parse. Then check quoting: text values take closed single quotes (boro=\'Manhattan\').';
+    case 'query.soql.no-such-column': {
+      const token = typeof column === 'string' && column ? inlineUpstream(column, 80) : undefined;
+      return token
+        ? `"${token}" is not a column. If it names a column, use its API field_name from socrata_get_dataset; if it is a text value, single-quote it ('${token}').`
+        : "An identifier is not a column. Use API field names (field_name from socrata_get_dataset), and single-quote text values (boro='Manhattan') so they are not read as column names.";
+    }
+    case 'query.soql.type-mismatch':
+      return "A literal's type does not match its column. Check data_type with socrata_get_dataset: Text columns need single-quoted strings (year='2020'); Number columns use bare literals (year=2020).";
+    default:
+      return;
+  }
+}
+
 export const queryDataset = tool('socrata_query_dataset', {
   title: 'Query Dataset',
   description:
-    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. All SODA 2.1 row values are strings even for numeric columns — check dataType from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When CANVAS_PROVIDER_TYPE=duckdb and rows fill the limit, results spill to a DataCanvas table for SQL-based analysis.',
+    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When CANVAS_PROVIDER_TYPE=duckdb and rows fill the limit, results spill to a DataCanvas table for SQL-based analysis.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     domain: z
       .string()
       .optional()
       .describe(
-        'Portal domain (e.g. data.seattle.gov). Defaults to SOCRATA_DEFAULT_DOMAIN or data.seattle.gov.',
+        'Portal the dataset lives on, as a bare hostname (e.g. data.cityofnewyork.us); URL forms like https://data.cityofnewyork.us/ are accepted and reduced to the host. Pass the domain from the same socrata_find_datasets result as dataset_id. Defaults to SOCRATA_DEFAULT_DOMAIN or data.seattle.gov, which is wrong for another portal’s ID.',
       ),
     dataset_id: z
       .string()
-      .describe('Four-by-four dataset ID (e.g. kzjm-xkqj). Obtain from socrata_find_datasets.'),
+      .describe(
+        'Four-by-four dataset ID (e.g. kzjm-xkqj). IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
+      ),
     search: z
       .string()
       .optional()
@@ -47,18 +72,20 @@ export const queryDataset = tool('socrata_query_dataset', {
       .string()
       .optional()
       .describe(
-        'SoQL SELECT clause — column names, aliases, aggregates: "state, sum(deaths) as total_deaths". Omit for all columns.',
+        'SoQL SELECT clause — API field names (field_name from socrata_get_dataset, not display labels), aliases, aggregates: "state, sum(deaths) as total_deaths". Omit for all columns.',
       ),
     where: z
       .string()
       .optional()
       .describe(
-        "SoQL WHERE clause. Check column dataType from socrata_get_dataset first — Number columns: year=2023, Text columns: year='2023'. Operators: =, !=, >, <, LIKE, IN(...), BETWEEN, IS NULL, starts_with(), contains(), AND, OR, NOT.",
+        "SoQL WHERE clause over API field names (field_name from socrata_get_dataset). Check column data_type there first — Number columns: year=2023, Text columns: year='2023'; an unquoted text value is read as a column name. Operators: =, !=, >, <, LIKE, IN(...), BETWEEN, IS NULL, starts_with(), contains(), AND, OR, NOT.",
       ),
     group: z
       .string()
       .optional()
-      .describe('SoQL GROUP BY clause. Requires an aggregate function in select.'),
+      .describe(
+        'SoQL GROUP BY clause over API field names (field_name from socrata_get_dataset). Requires an aggregate function in select.',
+      ),
     having: z
       .string()
       .optional()
@@ -66,7 +93,9 @@ export const queryDataset = tool('socrata_query_dataset', {
     order: z
       .string()
       .optional()
-      .describe('SoQL ORDER BY clause, e.g. "total_deaths DESC" or "date ASC".'),
+      .describe(
+        'SoQL ORDER BY clause over API field names or select aliases, e.g. "total_deaths DESC" or "date ASC".',
+      ),
     limit: z
       .number()
       .int()
@@ -95,7 +124,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     assembled_query: z
       .string()
       .describe('SoQL clauses assembled for this request — useful for learning the syntax.'),
-    domain: z.string().describe('Portal domain queried.'),
+    domain: z.string().describe('Portal hostname queried, normalized from the domain input.'),
     dataset_id: z.string().describe('Dataset ID queried.'),
     canvas_id: z
       .string()
@@ -141,16 +170,30 @@ export const queryDataset = tool('socrata_query_dataset', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Dataset does not exist on this domain.',
+      when: 'The dataset does not exist on the domain queried — including a gateway HTTP 403 for an ID the portal does not serve.',
       recovery:
-        'Search again with socrata_find_datasets — the dataset may be on a different domain or was retired.',
+        'The ID may belong to a different portal — retry with the domain from the same socrata_find_datasets result, or search again with socrata_find_datasets; the dataset may also have been retired.',
+    },
+    {
+      reason: 'unknown_domain',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The domain does not serve the Socrata API to this server: its hostname does not resolve (DNS ENOTFOUND), its API answered HTTP 404 without a Socrata error body, it redirected the request to another host that did not answer with Socrata data, or a gateway refused a dataset the Discovery catalog lists there.',
+      recovery:
+        'The domain is not serving the Socrata API. Check the hostname for typos and pass a bare portal hostname such as data.cityofnewyork.us, or pick one from socrata_list_portals.',
+    },
+    {
+      reason: 'invalid_domain',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The domain is not a hostname, even after dropping a URL scheme, path, or query.',
+      recovery:
+        'Pass a bare portal hostname such as data.cityofnewyork.us, or pick one from socrata_list_portals.',
     },
     {
       reason: 'soql_error',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SoQL syntax error or unknown column name.',
+      when: 'SoQL syntax error, unknown column, or literal/column type mismatch. data.socrataCode carries the upstream code and data.column the offending token when upstream names one.',
       recovery:
-        "Check column names with socrata_get_dataset. Text columns need single-quoted strings (year='2020'); Number columns use bare literals (year=2020).",
+        "Check API field names (field_name) and data types with socrata_get_dataset. Text columns need single-quoted strings (year='2020'); Number columns use bare literals (year=2020).",
     },
     {
       reason: 'rate_limited',
@@ -204,14 +247,32 @@ export const queryDataset = tool('socrata_query_dataset', {
       );
     } catch (err) {
       // Re-throw service failures that map to declared contract reasons via
-      // ctx.fail so the contract recovery hint reaches the wire.
+      // ctx.fail so a recovery hint reaches the wire. A not_found whose ID the
+      // Discovery catalog places on another portal names that portal, and a
+      // soql_error takes the hint for its upstream code, instead of the static
+      // hint.
       if (err instanceof McpError) {
-        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
-        if (reason === 'not_found' || reason === 'soql_error' || reason === 'rate_limited') {
-          throw ctx.fail(reason, err.message, {
-            ...(err.data as Record<string, unknown>),
-            ...ctx.recoveryFor(reason),
-          });
+        const data = (err.data ?? {}) as Record<string, unknown>;
+        const { reason, found_on_domain: foundOn, socrataCode, column } = data;
+        if (
+          reason === 'not_found' ||
+          reason === 'unknown_domain' ||
+          reason === 'invalid_domain' ||
+          reason === 'soql_error' ||
+          reason === 'rate_limited'
+        ) {
+          const hint =
+            reason === 'not_found' && typeof foundOn === 'string'
+              ? `${input.dataset_id} is on ${foundOn} — retry with domain "${foundOn}".`
+              : reason === 'soql_error'
+                ? soqlRecoveryHint(socrataCode, column)
+                : undefined;
+          throw ctx.fail(
+            reason,
+            err.message,
+            { ...data, ...(hint ? { recovery: { hint } } : ctx.recoveryFor(reason)) },
+            { cause: err },
+          );
         }
       }
       throw err;
@@ -220,7 +281,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     if (qResult.rowCount === 0) {
       ctx.enrich.notice(
         `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${where}` : ''}. ` +
-          'Check column names and quoting with socrata_get_dataset, or broaden the filter.',
+          'Check field names and quoting with socrata_get_dataset, or broaden the filter.',
       );
     } else if (qResult.rowCount >= input.limit) {
       // Only claim an exact count when the recount actually produced one —
@@ -250,7 +311,7 @@ export const queryDataset = tool('socrata_query_dataset', {
         const canvasRows: Record<string, unknown>[] = [];
         for await (const row of svc.streamDatasetRows(
           {
-            domain,
+            domain: qResult.domain,
             datasetId: input.dataset_id,
             ...(search ? { search } : {}),
             ...(select ? { select } : {}),
@@ -288,7 +349,7 @@ export const queryDataset = tool('socrata_query_dataset', {
       row_count: qResult.rowCount,
       ...(qResult.totalCount != null ? { total_count: qResult.totalCount } : {}),
       assembled_query: qResult.assembledQuery,
-      domain,
+      domain: qResult.domain,
       dataset_id: input.dataset_id,
       ...(canvasId ? { canvas_id: canvasId } : {}),
       ...(canvasRowCount != null ? { canvas_row_count: canvasRowCount } : {}),

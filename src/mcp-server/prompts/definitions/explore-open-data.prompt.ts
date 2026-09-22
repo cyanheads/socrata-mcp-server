@@ -49,8 +49,8 @@ export const exploreOpenData = prompt('explore_open_data', {
           `Use \`socrata_find_datasets\` with relevant keywords${args.portal ? ` scoped to \`${args.portal}\`` : ''}. Look for datasets that directly address the topic. Note the dataset_id and domain for each candidate.`,
           '',
           '**Step 3 — Inspect schema before querying**',
-          'For the most promising dataset, call `socrata_get_dataset` to get the full column schema. Pay attention to:',
-          '- Column names and data types (determines WHERE clause quoting)',
+          'For the most promising dataset, call `socrata_get_dataset` with its dataset_id and the domain from the same result (an ID is only valid on its own portal) to get the full column schema. Pay attention to:',
+          '- Column field_name values — the API field names SoQL references, not display labels — and data types (determines WHERE clause quoting)',
           '- Row count (signals dataset size; approximate — may be derived from cached column metadata, see row_count_source)',
           '- Last updated timestamp (freshness)',
           '- Number vs Text column types (Number → bare literals, Text → single-quoted strings)',
@@ -60,7 +60,7 @@ export const exploreOpenData = prompt('explore_open_data', {
           args.geography
             ? `- Add a WHERE clause to scope to ${args.geography} if a location column is available`
             : '',
-          '- Use select to pick only needed columns',
+          '- Use select to pick only needed columns, by field_name',
           '- Set a reasonable limit (100–500) to explore',
           '- The assembled_query field shows the SoQL used',
           '',
