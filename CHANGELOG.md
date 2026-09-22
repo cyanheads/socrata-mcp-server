@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-22 · ⚠️ Breaking
+
+socrata_find_datasets column_names now returns SoQL field names instead of display labels; upstream failures from non-Socrata hosts, cross-portal dataset IDs, and federated portal catalogs are now classified instead of falling through as generic errors.
+
 ## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-09-20
 
 mcp-ts-core ^0.13.6: canvas_id is validated as a minted token at the argument level, tool errors close with a reason/retryable suffix, and Socrata HTTP errors drop the request URL from client-facing data. The dev skill tree moves to framework-skills/.
