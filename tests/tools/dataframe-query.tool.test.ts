@@ -234,6 +234,21 @@ describe('dataframeQuery', () => {
     });
   });
 
+  it('format renders the whole executed SQL past the old 200-character cap (#19)', () => {
+    const conditions = Array.from({ length: 12 }, (_, i) => `year <> ${2000 + i}`).join(' AND ');
+    const sql = `SELECT primary_type, count(*) AS n FROM ijzp_q8t2_rows WHERE ${conditions} GROUP BY primary_type ORDER BY n DESC`;
+    const output = {
+      rows: [{ primary_type: 'THEFT', n: 3 }],
+      row_count: 1,
+      sql,
+      canvas_id: 'abc1234567',
+    };
+    const text = (dataframeQuery.format!(output)[0] as { text?: string }).text ?? '';
+
+    expect(sql.length).toBeGreaterThan(200);
+    expect(text).toContain(`**SQL:** \`${sql}\``);
+  });
+
   it('format renders every row in table mode — no 50-row render cap (#19)', () => {
     const rows = Array.from({ length: 60 }, (_, i) => ({ id: i, type: 'X' }));
     const output = { rows, row_count: 60, sql: 'SELECT id, type FROM t', canvas_id: 'abc1234567' };

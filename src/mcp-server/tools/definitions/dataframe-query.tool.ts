@@ -32,7 +32,7 @@ const SQL_GATE_REJECTION_REASONS: ReadonlySet<string> = new Set([
 export const dataframeQuery = tool('socrata_dataframe_query', {
   title: 'Query DataCanvas Table',
   description:
-    'Run SELECT-only SQL against a DataCanvas table populated by socrata_query_dataset. DuckDB infers types from spilled data, so numeric columns that SODA returned as strings become queryable with numeric comparisons (year > 2020, amount < 500). Only works when CANVAS_PROVIDER_TYPE=duckdb is set. Use socrata_dataframe_describe to see registered tables and their schemas.',
+    'Run SELECT-only SQL against a DataCanvas table populated by socrata_query_dataset. Columns SODA types as number (including aggregate aliases like count(*) as n) are staged as DOUBLE, so numeric comparisons work without a cast (year > 2020, amount < 500). Text and timestamp columns stay VARCHAR — compare times with CAST(date AS TIMESTAMP). Only works when CANVAS_PROVIDER_TYPE=duckdb is set. Use socrata_dataframe_describe to see registered tables and their schemas.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
@@ -194,7 +194,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(`**${result.row_count} rows** from canvas \`${result.canvas_id}\``);
-    lines.push(`**SQL:** \`${result.sql.slice(0, 200)}\``);
+    lines.push(`**SQL:** \`${result.sql}\``);
 
     if (result.rows.length === 0) {
       lines.push('\n_No rows returned._');

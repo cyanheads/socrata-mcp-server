@@ -161,6 +161,29 @@ describe('findDatasets', () => {
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
   });
 
+  it('format renders the whole description past the old 2,000-character cap, blockquoted (#19)', () => {
+    const description = `${'a'.repeat(1500)}\n${'b'.repeat(960)}Z`;
+    const output = {
+      results: [
+        {
+          dataset_id: 'ijzp-q8t2',
+          domain: 'data.cityofchicago.org',
+          name: 'Crimes - 2001 to Present',
+          tags: [],
+          description,
+          column_names: ['id'],
+        },
+      ],
+    };
+    const text = (findDatasets.format!(output)[0] as { text?: string }).text ?? '';
+
+    expect(description).toHaveLength(2462);
+    expect(text).toContain(
+      `**Upstream dataset description:**\n> ${'a'.repeat(1500)}\n> ${'b'.repeat(960)}Z\n\n`,
+    );
+    expect(text).not.toContain('[truncated]');
+  });
+
   it('format renders every column name — no 8-column render cap (#19)', () => {
     const columnNames = Array.from({ length: 12 }, (_, i) => `col_${i}`);
     const output = {

@@ -113,6 +113,44 @@ describe('getDataset', () => {
     expect(text).toContain('source: column_cached_contents');
   });
 
+  describe('renders upstream text in full, still framed (#19)', () => {
+    // Two lines, 2,462 characters in all — past the old 2,000-character blockquote cap.
+    const longDescription = `${'a'.repeat(1500)}\n${'b'.repeat(960)}Z`;
+    // 417 characters with a pipe and a newline — past the old 400-character cell cap.
+    const longColumnDescription = `${'c'.repeat(300)} x|y \n${'d'.repeat(110)}W`;
+    const output = {
+      dataset_id: 'ijzp-q8t2',
+      domain: 'data.cityofchicago.org',
+      name: 'Crimes - 2001 to Present',
+      tags: [],
+      description: longDescription,
+      columns: [
+        { field_name: 'census_block_2020', data_type: 'Text', description: longColumnDescription },
+      ],
+    };
+    const text = () => (getDataset.format!(output)[0] as { text?: string }).text ?? '';
+
+    it('carries the whole dataset description, every line blockquoted', () => {
+      expect(longDescription).toHaveLength(2462);
+      expect(text()).toContain(`> ${'a'.repeat(1500)}\n> ${'b'.repeat(960)}Z`);
+      expect(text()).not.toContain('[truncated]');
+    });
+
+    it('carries the whole column description with pipes and newlines escaped', () => {
+      expect(longColumnDescription).toHaveLength(417);
+      expect(text()).toContain(`${'c'.repeat(300)} x\\|y  ${'d'.repeat(110)}W |`);
+      expect(text()).not.toContain('[truncated]');
+    });
+
+    it('carries the whole dataset name in the heading, newlines collapsed', () => {
+      const longName = `${'n'.repeat(250)}\nEND`;
+      const rendered =
+        (getDataset.format!({ ...output, name: longName })[0] as { text?: string }).text ?? '';
+      expect(rendered).toContain(`## "${'n'.repeat(250)} END"`);
+      expect(rendered).not.toContain('[truncated]');
+    });
+  });
+
   it('formats output with ID, domain, column table', () => {
     const output = {
       dataset_id: 'kzjm-xkqj',

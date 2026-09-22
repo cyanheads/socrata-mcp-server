@@ -9,7 +9,6 @@ import { getServerConfig } from '@/config/server-config.js';
 import {
   escapeTableCell,
   inlineUpstream,
-  UPSTREAM_CELL_MAX_CHARS,
   upstreamBlockquote,
 } from '@/mcp-server/tools/upstream-text.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
@@ -208,7 +207,7 @@ export const getDataset = tool('socrata_get_dataset', {
     lines.push('| Field | Type | Description (upstream) |');
     lines.push('|:------|:-----|:-----------------------|');
     for (const col of result.columns) {
-      const desc = col.description ? escapeTableCell(col.description, UPSTREAM_CELL_MAX_CHARS) : '';
+      const desc = col.description ? escapeTableCell(col.description) : '';
       const nullInfo = col.non_null_count != null ? ` (${col.non_null_count} non-null)` : '';
       lines.push(
         `| \`${escapeTableCell(col.field_name)}\` | ${escapeTableCell(col.data_type)}${nullInfo} | ${desc} |`,
