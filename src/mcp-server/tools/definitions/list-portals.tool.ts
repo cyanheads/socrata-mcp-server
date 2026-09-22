@@ -4,7 +4,6 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const PortalEntrySchema = z
@@ -28,7 +27,7 @@ const PortalEntrySchema = z
 export const listPortals = tool('socrata_list_portals', {
   title: 'List Socrata Portals',
   description:
-    'List known Socrata-powered government open-data portals with their domain, organization name, and approximate dataset count. The catalog is a curated list of 40 well-known portals; dataset counts are fetched from the Discovery API and cached for ~24 hours. Filtering is client-side substring match on the query parameter. Use this first when you do not know which portal to target, then pass the domain to socrata_find_datasets.',
+    'List known Socrata-powered government open-data portals with their domain, organization name, and approximate dataset count. The catalog is a curated list of 39 well-known portals; dataset counts are fetched from the Discovery API and cached for ~24 hours. Filtering is client-side substring match on the query parameter. Use this first when you do not know which portal to target, then pass the domain to socrata_find_datasets.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     query: z
@@ -59,16 +58,6 @@ export const listPortals = tool('socrata_list_portals', {
       .optional()
       .describe('Recovery hint when no portals matched the filter. Absent on non-empty pages.'),
   },
-
-  errors: [
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Discovery API returned 429.',
-      retryable: true,
-      recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
-    },
-  ],
 
   async handler(input, ctx) {
     ctx.log.info('Listing portals', { query: input.query, limit: input.limit });
