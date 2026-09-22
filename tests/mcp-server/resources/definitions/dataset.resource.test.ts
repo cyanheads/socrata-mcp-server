@@ -84,7 +84,10 @@ describe('datasetResource', () => {
       await expect(datasetResource.handler(params, ctx)).rejects.toThrow();
     });
 
-    it('throws NotFound when service returns a dataset with no name', async () => {
+    it('returns whatever dataset the service returned, as socrata_get_dataset does — the not-this-dataset check lives in getDataset', async () => {
+      // getDataset rejects a views answer whose id is not the requested one
+      // (covered through the real service in tests/tools/upstream-errors.test.ts),
+      // so a returned dataset is the requested one even with an empty name.
       const ctx = createMockContext();
       mockGetDataset.mockResolvedValue({
         datasetId: 'aaaa-1111',
@@ -98,9 +101,9 @@ describe('datasetResource', () => {
         domain: 'data.example.gov',
         datasetId: 'aaaa-1111',
       });
-      await expect(datasetResource.handler(params, ctx)).rejects.toMatchObject({
-        message: expect.stringContaining('not found'),
-      });
+      const result = await datasetResource.handler(params, ctx);
+
+      expect(result).toMatchObject({ dataset_id: 'aaaa-1111', name: '' });
     });
 
     it('handles sparse upstream metadata — omits optional fields not present', async () => {

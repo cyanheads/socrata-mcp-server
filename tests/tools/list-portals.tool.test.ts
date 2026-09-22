@@ -19,7 +19,7 @@ const mockService = { listPortals: mockListPortals };
 const samplePortals = [
   { domain: 'data.seattle.gov', organization: 'City of Seattle', datasetCount: 500 },
   { domain: 'data.cityofnewyork.us', organization: 'City of New York', datasetCount: 2000 },
-  { domain: 'data.sfgov.org', organization: 'City of San Francisco', datasetCount: 400 },
+  { domain: 'data.sf.gov', organization: 'City of San Francisco', datasetCount: 400 },
 ];
 
 beforeEach(() => {
@@ -110,7 +110,7 @@ describe('listPortals', () => {
     const output = {
       portals: [
         { domain: 'data.seattle.gov', organization: 'City of Seattle', dataset_count: 500 },
-        { domain: 'data.sfgov.org', dataset_count: 400 },
+        { domain: 'data.sf.gov', dataset_count: 400 },
       ],
     };
     const blocks = listPortals.format!(output);
@@ -118,7 +118,7 @@ describe('listPortals', () => {
     const text = (blocks[0] as { text?: string }).text ?? '';
     expect(text).toContain('data.seattle.gov');
     expect(text).toContain('City of Seattle');
-    expect(text).toContain('data.sfgov.org');
+    expect(text).toContain('data.sf.gov');
   });
 
   it('formats empty result as empty text', () => {

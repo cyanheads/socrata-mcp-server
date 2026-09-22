@@ -19,7 +19,7 @@ const mockService = { listPortals: mockListPortals };
 const samplePortals = [
   { domain: 'data.seattle.gov', organization: 'City of Seattle', datasetCount: 500 },
   { domain: 'data.cityofnewyork.us', organization: 'City of New York', datasetCount: 2000 },
-  { domain: 'data.sfgov.org', organization: 'City and County of San Francisco', datasetCount: 400 },
+  { domain: 'data.sf.gov', organization: 'City and County of San Francisco', datasetCount: 400 },
 ];
 
 beforeEach(() => {

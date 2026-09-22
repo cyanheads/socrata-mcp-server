@@ -42,6 +42,7 @@ export type DiscoveryResult = {
   description?: string;
   category?: string;
   tags: string[];
+  /** SoQL field names from Discovery `columns_field_name`, `:@computed_region_*` dropped. */
   columnNames: string[];
   license?: string;
   dataUpdatedAt?: string;
@@ -90,6 +91,8 @@ export type QueryDatasetOptions = {
 export type QueryResult = {
   rows: Record<string, unknown>[];
   rowCount: number;
+  /** Portal hostname queried, normalized from the caller's domain. */
+  domain: string;
   totalCount?: number;
   assembledQuery: string;
 };
@@ -98,6 +101,9 @@ export type QueryResult = {
  * Structured SODA API error shape. The error-code key varies by upstream
  * subsystem: the SoQL compiler emits `code` (e.g. `query.compiler.malformed`),
  * the query coordinator emits `errorCode` (e.g. `query.soql.no-such-column`).
+ * Not every error body has this shape — a SODA 404 can carry only
+ * `{ error: true, message }`, and Discovery answers `{ error: "<message>" }` —
+ * so this type gates only the 400/403 branches; status alone classifies the rest.
  */
 export type SodaError = {
   code?: string;

@@ -5,7 +5,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
@@ -16,10 +16,16 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
     'Fetch full metadata and column schema for a Socrata dataset addressable by stable URI. Same payload as socrata_get_dataset. Name, description, and column descriptions are upstream-provided portal metadata, not server-authored text. URI format: socrata://datasets/{domain}/{datasetId} (e.g. socrata://datasets/data.seattle.gov/kzjm-xkqj).',
   mimeType: 'application/json',
   params: z.object({
-    domain: z.string().describe('Portal domain (e.g. data.seattle.gov).'),
+    domain: z
+      .string()
+      .describe(
+        'Portal the dataset lives on, as a bare hostname (e.g. data.seattle.gov); case is normalized.',
+      ),
     datasetId: z
       .string()
-      .describe('Four-by-four dataset ID (e.g. kzjm-xkqj). Obtain from socrata_find_datasets.'),
+      .describe(
+        'Four-by-four dataset ID (e.g. kzjm-xkqj). IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
+      ),
   }),
   output: z.object({
     dataset_id: z.string().describe('Four-by-four Socrata dataset ID.'),
@@ -69,14 +75,9 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
     });
 
     const svc = getSocrataService();
+    // getDataset rejects a views answer that is not this dataset, so the
+    // resource and socrata_get_dataset classify the same responses alike.
     const meta = await svc.getDataset(params.domain, params.datasetId, ctx);
-
-    if (!meta.name) {
-      throw notFound(`Dataset ${params.datasetId} not found on ${params.domain}.`, {
-        domain: params.domain,
-        datasetId: params.datasetId,
-      });
-    }
 
     return {
       dataset_id: meta.datasetId,
