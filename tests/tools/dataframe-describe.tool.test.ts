@@ -37,7 +37,6 @@ describe('dataframeDescribe', () => {
             { name: 'incident_type', type: 'VARCHAR' },
             { name: 'year', type: 'BIGINT' },
           ],
-          registered_at: '2025-01-01T00:00:00.000Z',
         },
       ],
       canvas_id: 'abc1234567',
@@ -48,6 +47,15 @@ describe('dataframeDescribe', () => {
     expect(text).toContain('abc1234567');
     expect(text).toContain('kzjm_xkqj_rows');
     expect(text).toContain('incident_type');
+  });
+
+  it('promises no registration time — the canvas TableInfo carries none (#26)', () => {
+    expect(dataframeDescribe.description).not.toMatch(/regist(ration|ered) time/i);
+    expect(Object.keys(dataframeDescribe.output.shape.tables.element.shape)).toEqual([
+      'table_id',
+      'row_count',
+      'columns',
+    ]);
   });
 
   it('formats empty canvas state showing canvas_id', () => {
