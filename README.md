@@ -93,7 +93,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - Aggregation via `count(*)`, `sum()`, `avg()`, `min()`, `max()` with `group`/`having`
 - Up to 5000 rows per call with offset pagination; `total_count` returned when a plain row query is truncated (absent for grouped/aggregate queries)
 - `assembled_query` echoes the SoQL string for learning the syntax; all SODA 2.1 row values are strings except geo/location columns, which return nested objects
-- When `CANVAS_PROVIDER_TYPE=duckdb` and the result hits the limit, up to 50,000 matching rows spill to a DataCanvas table (`canvas_id` + `canvas_row_count`) for SQL via `socrata_dataframe_query`
+- When `CANVAS_PROVIDER_TYPE=duckdb` and the page fills `limit`, up to 50,000 matching rows spill to a DataCanvas table whatever the `limit` (`canvas_id`, `table_name`, `canvas_row_count`) — list its columns with `socrata_dataframe_describe`, then run SQL with `socrata_dataframe_query`. A small `limit` (e.g. 10) stages a large match without a large inline page
 - Typed errors: `invalid_id`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`)
 
 ---
@@ -101,7 +101,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 ### `socrata_dataframe_describe` <sub>tool</sub>
 
 - Requires `canvas_id` from a prior `socrata_query_dataset` spill — canvases cannot be enumerated, so omitting it fails with `canvas_id_required` rather than listing tables
-- Shows table name, row count, and DuckDB-inferred column types for each registered table
+- Shows table name, row count, and DuckDB column types for each registered table (SODA `number` → `DOUBLE`)
 - Only meaningful when `CANVAS_PROVIDER_TYPE=duckdb` is set
 - Typed errors: `canvas_id_required`, `canvas_not_found` (expired or unknown token — re-run `socrata_query_dataset` to stage a fresh canvas)
 
@@ -110,7 +110,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 ### `socrata_dataframe_query` <sub>tool</sub>
 
 - SELECT-only SQL against a `canvas_id` table staged by `socrata_query_dataset`; DDL, DML, and file-reading functions (`read_csv`, `read_parquet`) are rejected
-- DuckDB infers types from spilled data — numeric columns SODA returned as strings become queryable with numeric comparisons (`year > 2020`, `amount < 500`)
+- Spilled columns are typed from the SODA response headers: `number` columns (aggregate aliases included) are `DOUBLE`, so numeric comparisons work without a cast (`year > 2020`, `amount < 500`); text and timestamp columns stay `VARCHAR` — compare times with `CAST(date AS TIMESTAMP)`
 - Up to 10,000 rows per call, default 1000
 - Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE` not set), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, system catalog access, or a denied function)
 - Works out of the box when `CANVAS_PROVIDER_TYPE=duckdb` is set — DuckDB ships as a regular dependency
@@ -154,7 +154,7 @@ Agent-friendly output:
 
 - Assembled SoQL string echoed in every `socrata_query_dataset` response so agents can learn and refine syntax
 - Recovery hints on empty results — echoes applied filters with specific suggestions for broadening
-- Truncation disclosure — `truncated`/`shown`/`cap` fields when rows fill the limit, with guidance to page, raise the limit, or query the spilled canvas
+- Truncation disclosure — `truncated`/`shown`/`cap` fields when rows fill the limit, with guidance to page or raise the limit, naming the staged table and both dataframe tools when the result spilled
 - Typed error reasons across every tool (`invalid_id`, `not_found`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
 
 ## Getting started

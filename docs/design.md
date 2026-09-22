@@ -20,7 +20,7 @@ api_docs: https://dev.socrata.com/docs/endpoints
 | `socrata_query_dataset` | Execute a SoQL query against any dataset on any Socrata portal. Convenience `search` param for full-text; structured `select`, `where`, `group`, `having`, `order` for full control. Returns rows plus the assembled SoQL string. Clauses reference columns by API field name. All row values are strings in SODA 2.1 — numeric columns require bare literals in `where`, text columns require single-quoted strings. | `domain`, `dataset_id`, `search`, `select`, `where`, `group`, `having`, `order`, `limit`, `offset`, `canvas_id` | `readOnlyHint`, `openWorldHint: false` |
 | `socrata_list_portals` | List known Socrata-powered portals with their domain, organization, and dataset count. Backed by a curated portal list with live Discovery counts. | `query`, `limit`, `offset` | `readOnlyHint`, `openWorldHint: false` |
 | `socrata_dataframe_query` | Run SQL against a previously registered DataCanvas table. Use after `socrata_query_dataset` spills a large result set to canvas. | `canvas_id`, `sql`, `limit` | `readOnlyHint` |
-| `socrata_dataframe_describe` | List registered tables in a DataCanvas — schema, row count, column names, registered time. Shows what datasets are available for SQL queries. | `canvas_id` | `readOnlyHint` |
+| `socrata_dataframe_describe` | List registered tables in a DataCanvas — schema, row count, column names. Shows what datasets are available for SQL queries. | `canvas_id` | `readOnlyHint` |
 
 ### Resources
 
@@ -185,17 +185,18 @@ The Discovery lookup runs only on a `not_found`, makes one attempt under its own
 | `group` | `string?` | SoQL GROUP BY clause over API field names. Requires aggregate in `select`. |
 | `having` | `string?` | SoQL HAVING clause. Filters on aggregated results. |
 | `order` | `string?` | SoQL ORDER BY over API field names or `select` aliases: `"total_deaths DESC"`. |
-| `limit` | `number?` | Max rows (default 100, max 5000). Use with `offset` for pagination. |
+| `limit` | `number?` | Max rows (default 100, max 5000). Use with `offset` for pagination. With the canvas enabled, a page that fills `limit` stages up to 50,000 matching rows whatever `limit` is — a small `limit` stages a large match without a large inline page. |
 | `offset` | `number?` | Row offset for pagination. |
-| `canvas_id` | `string?` | DataCanvas token. When `CANVAS_PROVIDER_TYPE=duckdb`, results spill to canvas when rows exceed preview size. Omit to mint new canvas. |
+| `canvas_id` | `string?` | DataCanvas token. When `CANVAS_PROVIDER_TYPE=duckdb` and the page fills `limit`, up to 50,000 matching rows spill to a canvas table regardless of `limit`. Omit to mint new canvas. |
 
-**Output:** `{ rows: [object], rowCount, totalCount?, assembledQuery, domain, dataset_id, canvas_id?, canvas_row_count? }`.
+**Output:** `{ rows: [object], rowCount, totalCount?, assembledQuery, domain, dataset_id, canvas_id?, canvas_row_count?, table_name? }`.
 
 - `totalCount` is included when a plain row query is truncated (`rowCount < totalCount`) so the agent knows to paginate or narrow the query. Omitted for grouped/aggregate queries (`group` set) — the count strategy counts source rows, which would not describe the returned groups.
-- `canvas_id` is included when results spilled to a DataCanvas table (requires `CANVAS_PROVIDER_TYPE=duckdb`). The spill drains the matching set across paginated SODA calls into a **bounded copy** — up to 50,000 rows, reported in `canvas_row_count` — and `socrata_dataframe_query` runs SQL over that staged copy. When `total_count` exceeds the cap the canvas holds a subset, not the literal full result set; page with `offset` to reach rows beyond it. The inline `rows` stay bounded by the caller's `limit`. Socrata system columns (`:@computed_region_*`) are excluded from the spilled table — they are not valid canvas identifiers; the inline `rows` keep them.
+- `canvas_id` and `table_name` are included when results spilled to a DataCanvas table (requires `CANVAS_PROVIDER_TYPE=duckdb`). The spill fires when the page fills `limit` and drains the matching set across paginated SODA calls into a **bounded copy** — up to 50,000 rows whatever `limit` was, reported in `canvas_row_count` — and `socrata_dataframe_query` runs SQL over that staged copy, with `table_name` as the `FROM` target. When `total_count` exceeds the cap the canvas holds a subset, not the literal full result set; page with `offset` to reach rows beyond it. The inline `rows` stay bounded by the caller's `limit`. Socrata system columns (`:@computed_region_*`) are excluded from the spilled table — they are not valid canvas identifiers; the inline `rows` keep them. On a spill the truncation `notice` names the table, `socrata_dataframe_describe`, and `socrata_dataframe_query`; without one it gives only paging guidance.
+- The spilled table is typed from the `X-SODA2-Fields` / `X-SODA2-Types` headers of the query response: SODA `number` fields (aggregate aliases such as `count(*) as n` included) register as `DOUBLE`, so `year > 2020` works without a cast. Every other column keeps the type inferred over all staged rows — `boolean` → `BOOLEAN`, geo objects → `JSON`, `text` and `floating_timestamp` → `VARCHAR`. Timestamps stay `VARCHAR` because the canvas appender reads offset-less ISO strings as host-local time; `CAST(date AS TIMESTAMP)` keeps the wall-clock value. A header field null in every staged row still gets a column. When the headers are missing or do not pair up, the spill registers with inferred types and logs a warning. `DOUBLE` holds about 15–17 significant digits, so a longer `number` value rounds on the canvas while the inline `rows` keep the exact string.
 
 **SODA 2.1 quirks surfaced in output:**
-- All row values are strings in SODA 2.1 — even numeric columns. The column schema (`socrata_get_dataset`) is the source of truth for types; numeric parsing happens only when the caller needs it.
+- All row values are strings in SODA 2.1 — even numeric columns. The column schema (`socrata_get_dataset`) is the source of truth for types; numeric parsing happens only when the caller needs it. The canvas spill is the exception: its `number` columns are `DOUBLE`.
 - Computed region columns (`:@computed_region_*`) are excluded unless explicitly selected.
 
 **Tip in description** (not in output): To enumerate distinct values for a column, use `select: "col, count(*) as n"` + `group: "col"` + `order: "n DESC"`.
@@ -237,11 +238,11 @@ Only meaningful when `CANVAS_PROVIDER_TYPE=duckdb`. Follow the DataCanvas patter
 
 **`socrata_dataframe_query` inputs:** `canvas_id` (string, required), `sql` (string, SELECT-only SQL), `limit` (number?, default 1000).
 
-**`socrata_dataframe_query` output:** `{ rows: [object], rowCount, sql }`. Note: DuckDB infers types from the spilled data — numeric columns that SODA returned as strings are queryable with numeric comparisons after spillover.
+**`socrata_dataframe_query` output:** `{ rows: [object], rowCount, sql }`. Note: SODA `number` columns are staged as `DOUBLE` (see the `socrata_query_dataset` spill note), so numeric comparisons work without a cast; text and timestamp columns are `VARCHAR` — compare times with `CAST(date AS TIMESTAMP)`.
 
 **`socrata_dataframe_describe` inputs:** `canvas_id` (string, optional in the schema, but required in practice when canvas is enabled — canvases cannot be enumerated, so omitting it fails with `canvas_id_required` instead of listing tables).
 
-**`socrata_dataframe_describe` output:** `{ tables: [{ tableId, rowCount, columns: [{ name, type }], registeredAt }] }`.
+**`socrata_dataframe_describe` output:** `{ tables: [{ table_id, row_count, columns: [{ name, type }] }], canvas_id? }`. No registration time: the canvas `TableInfo` does not carry one.
 
 **Errors** (both tools): `canvas_not_found` / `NotFound` when the canvas_id doesn't match any active canvas — canvas tokens cannot be listed, so re-run `socrata_query_dataset` to stage a fresh canvas. `socrata_dataframe_describe` additionally throws `canvas_id_required` / `ValidationError` when canvas is enabled and `canvas_id` is omitted.
 
