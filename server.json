@@ -12,14 +12,14 @@
       "url": "https://socrata.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.2.0",
+  "version": "0.2.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -55,7 +55,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }

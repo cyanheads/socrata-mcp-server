@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-09-22
+
+socrata_query_dataset spills stage a typed schema and name their table, assembled_query includes $offset, and content[] renders upstream descriptions and executed SQL in full.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-22 · ⚠️ Breaking
 
 socrata_find_datasets column_names now returns SoQL field names instead of display labels; upstream failures from non-Socrata hosts, cross-portal dataset IDs, and federated portal catalogs are now classified instead of falling through as generic errors.
