@@ -12,7 +12,7 @@ export const portalsResource = resource('socrata://portals', {
   name: 'socrata-portals',
   title: 'Socrata Portal Catalog',
   description:
-    'List of known Socrata-powered government open-data portals with organization name and approximate dataset count. The catalog is a curated list of 40 well-known portals; dataset counts are fetched from the Discovery API and cached for ~24 hours (null when temporarily unavailable). Paginated — default 50 per page. Use the domain values with socrata_find_datasets to search a specific portal.',
+    'List of known Socrata-powered government open-data portals with organization name and approximate dataset count. The catalog is a curated list of 39 well-known portals; dataset counts are fetched from the Discovery API and cached for ~24 hours (null when temporarily unavailable). Paginated — default 50 per page. Use the domain values with socrata_find_datasets to search a specific portal.',
   mimeType: 'application/json',
   params: z.object({
     cursor: z.string().optional().describe('Opaque pagination cursor. Omit for first page.'),

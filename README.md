@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.16-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -57,11 +57,11 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 ### `socrata_list_portals` <sub>tool</sub>
 
-- Curated catalog of 40 well-known city, county, state, and federal portals — every member verified live in the Discovery catalog
+- Curated catalog of 39 well-known city, county, state, and federal portals — every member verified live in the Discovery catalog
 - Per-portal dataset counts fetched live from the Discovery API, cached ~24 hours (`0` means the portal exposes no dataset assets to the catalog; `null` means the count is temporarily unavailable)
 - Client-side substring filtering on domain or organization name; pagination up to 200 per page with offset
-- Returns domain (pass to `socrata_find_datasets`), organization name, and approximate dataset count
-- Typed error: `rate_limited` (retryable) when the Discovery API returns 429
+- Returns domain (pass to `socrata_find_datasets`), organization name, and approximate dataset count; the count includes datasets a portal federates from another Socrata tenant (Austin, Illinois, Mesa, and San Francisco publish through a data hub; Seattle catalogs under a sibling tenant)
+- Never fails on an upstream error — a count that cannot be fetched comes back `null` and the listing still returns
 
 ---
 
@@ -69,9 +69,10 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 - Full-text query across dataset names/descriptions; scope with `domain`, filter by `categories`/`tags`, restrict `only` to an asset type (datasets, maps, files, calendars, stories)
 - Sort by relevance, page views, created date, or updated date; up to 100 per page with offset pagination
-- Returns dataset IDs, names, domains, tags, update timestamps, and abbreviated column-name previews — call `socrata_get_dataset` for typed schema before writing queries
+- Returns dataset IDs, names, domains, tags, update timestamps, and `column_names` — the API field names SoQL takes (`cuisine_description`, not the display label `CUISINE DESCRIPTION`), computed-region columns dropped — call `socrata_get_dataset` for typed schema before writing queries
 - Recovery hints on empty results — echoes applied filters and suggests how to broaden
-- Typed error: `rate_limited` (retryable) when the Discovery API returns 429
+- `domain` takes a bare hostname; URL forms (`https://data.cdc.gov/`) are reduced to the host. A scoped search covers every dataset the portal publishes, including ones federated from another Socrata tenant, reported under the portal's own domain
+- Typed errors: `rate_limited` (retryable) when the Discovery API returns 429, `unknown_domain` when the Discovery catalog does not index the domain, `invalid_domain` when the domain is not a hostname
 
 ---
 
@@ -80,19 +81,20 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - Returns field names, Socrata data types, descriptions, row count (with `row_count_source` provenance), and licensing when available
 - Column `data_type` determines WHERE clause syntax: `Number` → bare literals (`year=2023`), `Text` → single-quoted strings (`year='2023'`)
 - Excludes computed region columns (`:@computed_region_*`) to reduce noise; includes per-column non-null counts when available
-- Typed errors: `invalid_id` (malformed four-by-four ID), `not_found` (valid format, no such dataset on the domain)
+- Dataset IDs are portal-scoped — pass the `domain` from the same `socrata_find_datasets` result; URL-form domains are reduced to the host
+- Typed errors: `invalid_id` (malformed four-by-four ID), `not_found` (no such dataset on the domain queried — the message names the ID and domain, and the recovery names the portal that holds the ID when the Discovery catalog knows it), `unknown_domain` (the domain is not serving the Socrata API — it does not resolve, is not a Socrata portal, or redirects elsewhere; fails on the first attempt), `invalid_domain` (not a hostname), `rate_limited` (retryable; honors the upstream `Retry-After`)
 - Always call before writing a `socrata_query_dataset` WHERE clause
 
 ---
 
 ### `socrata_query_dataset` <sub>tool</sub>
 
-- `search` for quick full-text lookup (`$q`), or combine `select`/`where`/`group`/`having`/`order` for full analytical control; operators `=`, `!=`, `>`, `<`, `LIKE`, `IN(...)`, `BETWEEN`, `IS NULL`, `starts_with()`, `contains()`, `AND`, `OR`, `NOT`
+- `search` for quick full-text lookup (`$q`), or combine `select`/`where`/`group`/`having`/`order` for full analytical control — clauses reference columns by API field name (`field_name` from `socrata_get_dataset`), never the display label; operators `=`, `!=`, `>`, `<`, `LIKE`, `IN(...)`, `BETWEEN`, `IS NULL`, `starts_with()`, `contains()`, `AND`, `OR`, `NOT`
 - Aggregation via `count(*)`, `sum()`, `avg()`, `min()`, `max()` with `group`/`having`
 - Up to 5000 rows per call with offset pagination; `total_count` returned when a plain row query is truncated (absent for grouped/aggregate queries)
 - `assembled_query` echoes the SoQL string for learning the syntax; all SODA 2.1 row values are strings except geo/location columns, which return nested objects
 - When `CANVAS_PROVIDER_TYPE=duckdb` and the result hits the limit, up to 50,000 matching rows spill to a DataCanvas table (`canvas_id` + `canvas_row_count`) for SQL via `socrata_dataframe_query`
-- Typed errors: `invalid_id`, `not_found`, `soql_error` (bad SoQL or unknown column), `rate_limited` (retryable)
+- Typed errors: `invalid_id`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`)
 
 ---
 
@@ -119,13 +121,13 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 - Returns the same payload as `socrata_get_dataset` — field names, data types, descriptions, row count, licensing
 - `domain` and `datasetId` come from `socrata_find_datasets`; `datasetId` must match the four-by-four pattern (e.g. `kzjm-xkqj`)
-- Fails validation on a malformed ID, and not-found when the dataset doesn't exist on the domain
+- Fails validation on a malformed ID, and not-found when the dataset doesn't exist on the domain (naming the portal that holds the ID when the Discovery catalog knows it)
 
 ---
 
 ### `socrata://portals` <sub>resource</sub>
 
-- Curated catalog of 40 known Socrata portals, cursor-paginated (`cursor` param, default 50 per page, capped at 200)
+- Curated catalog of 39 known Socrata portals, cursor-paginated (`cursor` param, default 50 per page, capped at 200)
 - Returns domain, organization name, and approximate dataset count (`0` = no dataset assets, `null` = temporarily unavailable), cached ~24 hours
 - Pass `domain` to `socrata_find_datasets` to scope a search to one portal
 
@@ -143,7 +145,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 Socrata-specific:
 
 - Full Socrata SODA 2.1 API integration — SoQL query builder with select, where, group, having, order, search, limit, offset
-- Discovery API for cross-portal dataset search and per-portal dataset counts (curated 40-portal catalog, counts cached ~24h)
+- Discovery API for cross-portal dataset search and per-portal dataset counts (curated 39-portal catalog, counts cached ~24h)
 - App token support (`SOCRATA_APP_TOKEN`) for higher per-IP rate limits
 - Configurable default portal domain via `SOCRATA_DEFAULT_DOMAIN`
 - DataCanvas spillover (DuckDB, bundled) — large query results register as SQL tables for analytical queries
@@ -153,7 +155,7 @@ Agent-friendly output:
 - Assembled SoQL string echoed in every `socrata_query_dataset` response so agents can learn and refine syntax
 - Recovery hints on empty results — echoes applied filters with specific suggestions for broadening
 - Truncation disclosure — `truncated`/`shown`/`cap` fields when rows fill the limit, with guidance to page, raise the limit, or query the spilled canvas
-- Typed error reasons across every tool (`invalid_id`, `not_found`, `soql_error`, `rate_limited`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
+- Typed error reasons across every tool (`invalid_id`, `not_found`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
 
 ## Getting started
 
@@ -337,7 +339,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage
-- Call `socrata_get_dataset` before writing WHERE clauses — column `data_type` determines quoting
+- Call `socrata_get_dataset` before writing WHERE clauses — `field_name` is what SoQL references and column `data_type` determines quoting
 - Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
 
 ## Contributing

@@ -33,7 +33,9 @@ await createApp({
   instructions:
     'Government open-data server wrapping the Socrata SODA 2.1 API and Discovery API.\n' +
     'Workflow: socrata_list_portals → socrata_find_datasets → socrata_get_dataset (inspect schema) → socrata_query_dataset.\n' +
-    'All SODA 2.1 row values are strings. Column dataType from socrata_get_dataset determines WHERE quoting:\n' +
+    'A dataset ID is only valid on its own portal: pass it with the domain from the same socrata_find_datasets result. Domains are bare hostnames (data.cityofnewyork.us); URL forms are reduced to the host.\n' +
+    'SoQL references columns by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label.\n' +
+    'All SODA 2.1 row values are strings. Column data_type from socrata_get_dataset determines WHERE quoting:\n' +
     '  Number columns: bare literals (year=2023)\n' +
     "  Text columns: single-quoted strings (year='2023')\n" +
     'Set SOCRATA_APP_TOKEN for higher rate limits. Set CANVAS_PROVIDER_TYPE=duckdb for SQL analytics on large result sets.',
