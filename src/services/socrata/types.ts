@@ -95,6 +95,14 @@ export type QueryResult = {
   domain: string;
   totalCount?: number;
   assembledQuery: string;
+  /**
+   * SODA type of each returned field (`number`, `text`, `floating_timestamp`,
+   * `boolean`, geo types, …), keyed by field name in header order — from the
+   * response's `X-SODA2-Fields` / `X-SODA2-Types` headers, so aliases and
+   * aggregates (`count(*) as n` → `number`) are included. Absent when either
+   * header is missing or they do not pair up.
+   */
+  fieldTypes?: ReadonlyMap<string, string>;
 };
 
 /**

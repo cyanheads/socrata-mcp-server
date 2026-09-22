@@ -481,6 +481,182 @@ describe('SocrataService.queryDataset total-count recount', () => {
   });
 });
 
+describe('SocrataService.queryDataset assembledQuery paging (#24)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    // One row under a limit of 2 — no recount request, so every call is the data page.
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse([{ id: '28545', primary_type: 'THEFT', year: '2025' }], 200, 'OK'),
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  const repro = {
+    domain: 'data.cityofchicago.org',
+    datasetId: 'ijzp-q8t2',
+    select: 'id,primary_type,year',
+    where: 'year=2025',
+    order: 'id ASC',
+    limit: 2,
+  };
+
+  /** The outbound data-page URL, decoded for readable assertions. */
+  const dataUrl = () =>
+    decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0])).replaceAll('+', ' ');
+
+  it('ends with $limit and $offset when offset > 0', async () => {
+    const result = await svc.queryDataset({ ...repro, offset: 2 }, createMockContext());
+
+    expect(result.assembledQuery).toBe(
+      '$select=id,primary_type,year $where=year=2025 $order=id ASC $limit=2 $offset=2',
+    );
+    expect(dataUrl()).toContain('$offset=2');
+  });
+
+  it('omits $offset when offset is 0 or omitted — never $offset=0', async () => {
+    const zero = await svc.queryDataset({ ...repro, offset: 0 }, createMockContext());
+    const omitted = await svc.queryDataset(repro, createMockContext());
+
+    for (const result of [zero, omitted]) {
+      expect(result.assembledQuery).toBe(
+        '$select=id,primary_type,year $where=year=2025 $order=id ASC $limit=2',
+      );
+    }
+    for (const call of fetchSpy.mock.calls) {
+      expect(String(call[0])).not.toContain('offset');
+    }
+  });
+
+  it('reports $limit and $offset rather than the default placeholder when offset is the only clause', async () => {
+    const result = await svc.queryDataset(
+      { domain: 'data.cityofchicago.org', datasetId: 'ijzp-q8t2', limit: 2, offset: 4 },
+      createMockContext(),
+    );
+
+    expect(result.assembledQuery).toBe('$limit=2 $offset=4');
+  });
+
+  it('keeps the default placeholder when no clause and no offset is sent (regression)', async () => {
+    const result = await svc.queryDataset(
+      { domain: 'data.cityofchicago.org', datasetId: 'ijzp-q8t2', limit: 2 },
+      createMockContext(),
+    );
+
+    expect(result.assembledQuery).toBe('(default — all columns, up to limit)');
+  });
+
+  it('carries $offset alongside $group/$having on a grouped query, with no total count', async () => {
+    const result = await svc.queryDataset(
+      {
+        domain: 'data.cityofchicago.org',
+        datasetId: 'ijzp-q8t2',
+        select: 'primary_type, count(*) as n',
+        group: 'primary_type',
+        having: 'count(*) > 10',
+        order: 'n DESC',
+        limit: 1,
+        offset: 5,
+      },
+      createMockContext(),
+    );
+
+    expect(result.assembledQuery).toBe(
+      '$select=primary_type, count(*) as n $group=primary_type $having=count(*) > 10 $order=n DESC $limit=1 $offset=5',
+    );
+    // Grouped at the limit: the recount is skipped, so there is no total and one request.
+    expect(result.totalCount).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(dataUrl()).toContain('$offset=5');
+  });
+});
+
+describe('SocrataService.queryDataset SODA field types (#25)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  const rows = [{ id: '1', primary_type: 'HOMICIDE', year: '2025' }];
+  const query = () =>
+    svc.queryDataset(
+      { domain: 'data.cityofchicago.org', datasetId: 'ijzp-q8t2', limit: 10 },
+      createMockContext(),
+    );
+
+  it('maps each X-SODA2-Fields name to its X-SODA2-Types type, aliases and aggregates included', async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(rows, 200, 'OK', {
+        'X-SODA2-Fields': '["id","primary_type","year","date","arrest","n"]',
+        'X-SODA2-Types': '["number","text","number","floating_timestamp","boolean","number"]',
+      }),
+    );
+
+    const result = await query();
+
+    expect(result.fieldTypes).toEqual(
+      new Map([
+        ['id', 'number'],
+        ['primary_type', 'text'],
+        ['year', 'number'],
+        ['date', 'floating_timestamp'],
+        ['arrest', 'boolean'],
+        ['n', 'number'],
+      ]),
+    );
+  });
+
+  it('leaves fieldTypes unset when X-SODA2-Types is missing', async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(rows, 200, 'OK', { 'X-SODA2-Fields': '["id","primary_type","year"]' }),
+    );
+
+    const result = await query();
+
+    expect(result.fieldTypes).toBeUndefined();
+    expect(result.rows).toEqual(rows);
+  });
+
+  it('leaves fieldTypes unset when the field and type counts differ', async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(rows, 200, 'OK', {
+        'X-SODA2-Fields': '["id","primary_type","year"]',
+        'X-SODA2-Types': '["number","text"]',
+      }),
+    );
+
+    expect((await query()).fieldTypes).toBeUndefined();
+  });
+
+  it('leaves fieldTypes unset when a header is not a JSON string array', async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(rows, 200, 'OK', {
+        'X-SODA2-Fields': 'id,primary_type,year',
+        'X-SODA2-Types': '["number","text","number"]',
+      }),
+    );
+
+    expect((await query()).fieldTypes).toBeUndefined();
+  });
+});
+
 describe('SocrataService.listPortals portal-count cache', () => {
   let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();

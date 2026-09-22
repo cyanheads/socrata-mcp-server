@@ -205,6 +205,24 @@ function parseJsonBody(text: string): unknown {
   }
 }
 
+/** True for a JSON array whose every element is a string. */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === 'string');
+}
+
+/**
+ * The SODA type of each field a `/resource` response returned, from its
+ * `X-SODA2-Fields` / `X-SODA2-Types` headers (JSON string arrays, index-aligned).
+ * Undefined when either header is missing, is not a string array, or the two
+ * differ in length — the pairing is then unknowable.
+ */
+function parseFieldTypes(headers: Headers): Map<string, string> | undefined {
+  const fields = parseJsonBody(headers.get('X-SODA2-Fields') ?? '');
+  const types = parseJsonBody(headers.get('X-SODA2-Types') ?? '');
+  if (!isStringArray(fields) || !isStringArray(types) || fields.length !== types.length) return;
+  return new Map(fields.map((field, i) => [field, types[i] as string]));
+}
+
 /**
  * True for an error body the SODA API itself wrote: a `message` plus `error: true`
  * (the codeless 404 some resource paths answer) or a `code`/`errorCode` key.
@@ -402,7 +420,19 @@ export class SocrataService {
    * and `not_found` are non-transient, so they fail on the first attempt; every
    * other network error and a same-host non-JSON 2xx stay transient.
    */
-  private fetchJson<T>(url: string, ctx: Context, expected?: ExpectedBody): Promise<T> {
+  private async fetchJson<T>(url: string, ctx: Context, expected?: ExpectedBody): Promise<T> {
+    return (await this.fetchJsonResponse<T>(url, ctx, expected)).body;
+  }
+
+  /**
+   * {@link fetchJson}, also returning the successful response's headers — the
+   * `/resource` endpoint carries each returned field's SODA type in them.
+   */
+  private fetchJsonResponse<T>(
+    url: string,
+    ctx: Context,
+    expected?: ExpectedBody,
+  ): Promise<{ body: T; headers: Headers }> {
     const host = new URL(url).host;
     return withRetry(
       async (attempt) => {
@@ -487,7 +517,7 @@ export class SocrataService {
                 'SOCRATA_APP_TOKEN rejected (invalid or revoked) — falling back to keyless requests; per-IP rate limits apply. Replace or unset the token to restore higher limits.',
                 { reason: 'invalid_app_token' },
               );
-              return this.fetchJson<T>(url, ctx, expected);
+              return this.fetchJsonResponse<T>(url, ctx, expected);
             }
           }
 
@@ -571,7 +601,7 @@ export class SocrataService {
           );
         }
 
-        return body as T;
+        return { body: body as T, headers: response.headers };
       },
       {
         operation: 'SocrataService.fetchJson',
@@ -596,9 +626,9 @@ export class SocrataService {
     datasetId: string,
     ctx: Context,
     expected: ExpectedBody,
-  ): Promise<T> {
+  ): Promise<{ body: T; headers: Headers }> {
     try {
-      return await this.fetchJson<T>(url, ctx, expected);
+      return await this.fetchJsonResponse<T>(url, ctx, expected);
     } catch (err) {
       if (!(err instanceof McpError) || err.data?.reason !== 'not_found') throw err;
       const foundOn = await this.lookupDatasetDomain(datasetId, ctx);
@@ -744,7 +774,7 @@ export class SocrataService {
     const url = `https://${host}/api/views/${datasetId}.json`;
     ctx.log.debug('Fetching dataset metadata', { domain: host, datasetId });
 
-    const raw = await this.fetchDatasetJson<Record<string, unknown>>(
+    const { body: raw } = await this.fetchDatasetJson<Record<string, unknown>>(
       url,
       host,
       datasetId,
@@ -835,7 +865,7 @@ export class SocrataService {
     ctx.log.debug('SoQL query', { domain: host, datasetId: opts.datasetId });
 
     // Fetch data rows.
-    const rows = await this.fetchDatasetJson<Record<string, unknown>[]>(
+    const { body: rows, headers } = await this.fetchDatasetJson<Record<string, unknown>[]>(
       dataUrl,
       host,
       opts.datasetId,
@@ -863,19 +893,20 @@ export class SocrataService {
       }
     }
 
-    const clauses = [...params.entries()]
-      .filter(([k]) => k !== '$limit' && k !== '$offset')
-      .map(([k, v]) => `${k}=${v}`);
+    // Echo exactly what was sent — `$offset` rides along only when non-zero,
+    // as in the request. A bare `$limit` is the default query.
+    const sent = [...params.entries()];
+    const fieldTypes = parseFieldTypes(headers);
 
     return {
       rows,
       rowCount: rows.length,
       domain: host,
       ...(totalCount != null ? { totalCount } : {}),
-      assembledQuery:
-        clauses.length > 0
-          ? [...clauses, `$limit=${limit}`].join(' ')
-          : '(default — all columns, up to limit)',
+      assembledQuery: sent.some(([k]) => k !== '$limit')
+        ? sent.map(([k, v]) => `${k}=${v}`).join(' ')
+        : '(default — all columns, up to limit)',
+      ...(fieldTypes ? { fieldTypes } : {}),
     };
   }
 
