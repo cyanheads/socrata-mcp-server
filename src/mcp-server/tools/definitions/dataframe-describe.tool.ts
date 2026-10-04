@@ -93,7 +93,6 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       throw ctx.fail(
         'canvas_id_required',
         'canvas_id is required when canvas is enabled — omitting it would create a new empty canvas, not list existing tables.',
-        { ...ctx.recoveryFor('canvas_id_required') },
       );
     }
     let instance: Awaited<ReturnType<DataCanvas['acquire']>>;
@@ -101,9 +100,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       instance = await canvas.acquire(input.canvas_id, ctx);
     } catch (err) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-        throw ctx.fail('canvas_not_found', err.message, {
-          ...ctx.recoveryFor('canvas_not_found'),
-        });
+        throw ctx.fail('canvas_not_found', err.message);
       }
       throw err;
     }

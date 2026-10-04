@@ -248,7 +248,6 @@ export const queryDataset = tool('socrata_query_dataset', {
       throw ctx.fail(
         'invalid_id',
         `Invalid dataset ID "${input.dataset_id}". Expected pattern like kzjm-xkqj.`,
-        { ...ctx.recoveryFor('invalid_id') },
       );
     }
 
@@ -307,7 +306,7 @@ export const queryDataset = tool('socrata_query_dataset', {
           throw ctx.fail(
             reason,
             err.message,
-            { ...data, ...(hint ? { recovery: { hint } } : ctx.recoveryFor(reason)) },
+            { ...data, ...(hint ? { recovery: { hint } } : {}) },
             { cause: err },
           );
         }

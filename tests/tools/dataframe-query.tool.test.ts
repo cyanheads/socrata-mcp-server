@@ -5,7 +5,7 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeQuery } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -13,6 +13,14 @@ import { setCanvas } from '@/services/canvas-accessor.js';
 afterEach(() => {
   setCanvas(undefined);
 });
+
+/** The error envelope a contract run returns — carries the framework's declared-hint fill. */
+async function contractError(input: { canvas_id: string; sql: string }) {
+  const result = await runToolContract(dataframeQuery, input);
+  expect(result.isError).toBe(true);
+  return (result.structuredContent as { error: { code: number; data: Record<string, unknown> } })
+    .error;
+}
 
 describe('dataframeQuery', () => {
   it('throws when canvas is not enabled', async () => {
@@ -143,13 +151,12 @@ describe('dataframeQuery', () => {
         ),
       ),
     );
-    const ctx = createMockContext({ errors: dataframeQuery.errors });
-    const input = dataframeQuery.input.parse({
+    const error = await contractError({
       canvas_id: 'abc1234567',
       sql: 'DELETE FROM kzjm_xkqj_rows',
     });
 
-    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'sql_rejected',
@@ -171,13 +178,12 @@ describe('dataframeQuery', () => {
         ),
       ),
     );
-    const ctx = createMockContext({ errors: dataframeQuery.errors });
-    const input = dataframeQuery.input.parse({
+    const error = await contractError({
       canvas_id: 'abc1234567',
       sql: 'SELECT * FROM information_schema.tables',
     });
 
-    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+    expect(error).toMatchObject({
       data: {
         reason: 'sql_rejected',
         gateReason: 'system_catalog_access',
@@ -219,13 +225,12 @@ describe('dataframeQuery', () => {
         ),
       ),
     );
-    const ctx = createMockContext({ errors: dataframeQuery.errors });
-    const input = dataframeQuery.input.parse({
+    const error = await contractError({
       canvas_id: 'abc1234567',
       sql: 'SELECT * FROM kzjm_xkqj_rows',
     });
 
-    await expect(dataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: {
         reason: 'table_not_found',

@@ -157,12 +157,7 @@ export const findDatasets = tool('socrata_find_datasets', {
           reason === 'unknown_domain' ||
           reason === 'invalid_domain'
         ) {
-          throw ctx.fail(
-            reason,
-            err.message,
-            { ...data, ...ctx.recoveryFor(reason) },
-            { cause: err },
-          );
+          throw ctx.fail(reason, err.message, data, { cause: err });
         }
       }
       throw err;

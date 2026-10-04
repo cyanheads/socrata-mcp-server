@@ -114,7 +114,6 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       throw ctx.fail(
         'canvas_disabled',
         'DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb to run SQL queries.',
-        { ...ctx.recoveryFor('canvas_disabled') },
       );
     }
 
@@ -128,9 +127,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       instance = await canvas.acquire(input.canvas_id, ctx);
     } catch (err) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-        throw ctx.fail('canvas_not_found', err.message, {
-          ...ctx.recoveryFor('canvas_not_found'),
-        });
+        throw ctx.fail('canvas_not_found', err.message);
       }
       throw err;
     }
@@ -155,16 +152,10 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
           // spread would clobber the gate's own reason under the same key — lift
           // it out first and preserve it as gateReason diagnostic context.
           const { reason: gateReason, ...rest } = data;
-          throw ctx.fail('sql_rejected', err.message, {
-            ...rest,
-            gateReason,
-            ...ctx.recoveryFor('sql_rejected'),
-          });
+          throw ctx.fail('sql_rejected', err.message, { ...rest, gateReason });
         }
         if (err.code === JsonRpcErrorCode.NotFound && reason === 'missing_table') {
-          throw ctx.fail('table_not_found', err.message, {
-            ...ctx.recoveryFor('table_not_found'),
-          });
+          throw ctx.fail('table_not_found', err.message);
         }
       }
       throw err;

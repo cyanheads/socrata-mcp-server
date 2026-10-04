@@ -5,7 +5,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { findDatasets } from '@/mcp-server/tools/definitions/find-datasets.tool.js';
 import { getDataset } from '@/mcp-server/tools/definitions/get-dataset.tool.js';
@@ -37,6 +37,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(mockService);
 });
+
+/** The error envelope a contract run returns — carries the framework's declared-hint fill. */
+function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
+  expect(result.isError).toBe(true);
+  return (result.structuredContent as { error: { code: number; data: Record<string, unknown> } })
+    .error;
+}
 
 // ---------------------------------------------------------------------------
 // Input validation — Zod schema boundary enforcement
@@ -171,15 +178,12 @@ describe('error contract propagation', () => {
     mockGetDataset.mockRejectedValue(
       new McpError(JsonRpcErrorCode.NotFound, 'Dataset not found', { reason: 'not_found' }),
     );
-    const ctx = createMockContext({ errors: getDataset.errors });
-    const input = getDataset.input.parse({ dataset_id: 'kzjm-xkqj' });
-    // The reason arrives pre-set from the service; the handler's rewrap is what
-    // attaches the recovery hint, so assert the hint, not just the reason.
-    await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'not_found',
-        recovery: { hint: expect.stringContaining('different portal') },
-      },
+    // The reason arrives pre-set from the service; the framework fills the
+    // declared recovery hint on the wire, so assert the hint, not just the reason.
+    const error = errorOf(await runToolContract(getDataset, { dataset_id: 'kzjm-xkqj' }));
+    expect(error.data).toMatchObject({
+      reason: 'not_found',
+      recovery: { hint: expect.stringContaining('different portal') },
     });
   });
 
@@ -188,13 +192,10 @@ describe('error contract propagation', () => {
     mockQueryDataset.mockRejectedValue(
       new McpError(JsonRpcErrorCode.NotFound, 'Dataset not found', { reason: 'not_found' }),
     );
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    const input = queryDataset.input.parse({ dataset_id: 'kzjm-xkqj' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'not_found',
-        recovery: { hint: expect.stringContaining('different portal') },
-      },
+    const error = errorOf(await runToolContract(queryDataset, { dataset_id: 'kzjm-xkqj' }));
+    expect(error.data).toMatchObject({
+      reason: 'not_found',
+      recovery: { hint: expect.stringContaining('different portal') },
     });
   });
 
@@ -248,31 +249,20 @@ describe('error contract propagation', () => {
   ] as const)('%s attaches the declared %s recovery hint', async (tool, reason, hintFragment) => {
     const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
     const upstream = new McpError(JsonRpcErrorCode.NotFound, 'upstream failure', { reason });
-    let run: () => unknown;
+    let result: Awaited<ReturnType<typeof runToolContract>>;
     if (tool === 'findDatasets') {
       mockFindDatasets.mockRejectedValue(upstream);
-      run = () =>
-        findDatasets.handler(
-          findDatasets.input.parse({ query: 'x' }),
-          createMockContext({ errors: findDatasets.errors }),
-        );
+      result = await runToolContract(findDatasets, { query: 'x' });
     } else if (tool === 'getDataset') {
       mockGetDataset.mockRejectedValue(upstream);
-      run = () =>
-        getDataset.handler(
-          getDataset.input.parse({ dataset_id: 'kzjm-xkqj' }),
-          createMockContext({ errors: getDataset.errors }),
-        );
+      result = await runToolContract(getDataset, { dataset_id: 'kzjm-xkqj' });
     } else {
       mockQueryDataset.mockRejectedValue(upstream);
-      run = () =>
-        queryDataset.handler(
-          queryDataset.input.parse({ dataset_id: 'kzjm-xkqj' }),
-          createMockContext({ errors: queryDataset.errors }),
-        );
+      result = await runToolContract(queryDataset, { dataset_id: 'kzjm-xkqj' });
     }
-    await expect(Promise.resolve().then(run)).rejects.toMatchObject({
-      data: { reason, recovery: { hint: expect.stringContaining(hintFragment) } },
+    expect(errorOf(result).data).toMatchObject({
+      reason,
+      recovery: { hint: expect.stringContaining(hintFragment) },
     });
   });
 

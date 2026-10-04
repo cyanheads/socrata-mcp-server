@@ -18,12 +18,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.2.1",
-      "packageArguments": [
-        { "type": "positional", "value": "run" },
-        { "type": "positional", "value": "start:stdio" }
-      ],
       "environmentVariables": [
         {
           "name": "SOCRATA_APP_TOKEN",
@@ -37,6 +33,13 @@
           "format": "string",
           "isRequired": false,
           "default": "data.seattle.gov"
+        },
+        {
+          "name": "SOCRATA_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to enable socrata_dataframe_drop, which deletes staged DataCanvas data. Off, the tool is listed as disabled.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         },
         {
           "name": "MCP_LOG_LEVEL",
@@ -54,13 +57,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.2.1",
-      "packageArguments": [
-        { "type": "positional", "value": "run" },
-        { "type": "positional", "value": "start:http" }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "SOCRATA_APP_TOKEN",
           "description": "Socrata app token (X-App-Token header). Without a token, requests share a throttled pool per source IP. Free to register at any Socrata portal.",
@@ -73,6 +78,13 @@
           "format": "string",
           "isRequired": false,
           "default": "data.seattle.gov"
+        },
+        {
+          "name": "SOCRATA_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to enable socrata_dataframe_drop, which deletes staged DataCanvas data. Off, the tool is listed as disabled.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         },
         {
           "name": "MCP_HTTP_HOST",

@@ -5,7 +5,7 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDescribe } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -99,11 +99,12 @@ describe('dataframeDescribe', () => {
     // acquire(undefined) would mint a fresh empty canvas and describe it as empty —
     // the handler must fail fast instead of ever calling acquire without an id.
     const mockCanvas = { acquire: vi.fn() };
-    const ctx = createMockContext({ errors: dataframeDescribe.errors });
     setCanvas(mockCanvas as unknown as DataCanvas);
 
-    const input = dataframeDescribe.input.parse({});
-    await expect(dataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
+    // Through the contract runner, which fills the declared recovery hint as production does.
+    const result = await runToolContract(dataframeDescribe, {});
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { error: unknown }).error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'canvas_id_required',
