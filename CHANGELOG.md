@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-03
 
-New opt-in socrata_dataframe_drop removes a staged DataCanvas canvas or one table on it. mcp-ts-core 0.13.11 adds the request id to error responses, repairs stringified-object and integer-for-string arguments, and keeps stack traces and request context out of client error data.
+New opt-in socrata_dataframe_drop removes a staged DataCanvas canvas or one table on it. mcp-ts-core 0.13.7–0.13.11 add the request id to error responses, repairs stringified-object and integer-for-string arguments, and keeps stack traces and request context out of client error data.
 
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-09-22
 
