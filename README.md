@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/socrata-mcp-server</h1>
   <p><b>Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP.</b>
-  <div>6 Tools • 2 Resources • 1 Prompt</div>
+  <div>7 Tools • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -37,6 +37,7 @@ Government open-data portals — searched and queried via the Socrata SODA 2.1 A
 | `socrata_query_dataset` | Execute a SoQL query against any dataset: search, select, where, group, having, order, with DataCanvas spillover |
 | `socrata_dataframe_describe` | List registered tables in a DataCanvas session — schema, row count, column names |
 | `socrata_dataframe_query` | Run SELECT-only SQL against DataCanvas tables populated by `socrata_query_dataset` |
+| `socrata_dataframe_drop` | Drop a DataCanvas canvas, or one table on it — opt-in via `SOCRATA_DATAFRAME_DROP_ENABLED=true` |
 
 ### Resources
 
@@ -114,6 +115,16 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - Up to 10,000 rows per call, default 1000
 - Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE` not set), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, system catalog access, or a denied function)
 - Works out of the box when `CANVAS_PROVIDER_TYPE=duckdb` is set — DuckDB ships as a regular dependency
+
+---
+
+### `socrata_dataframe_drop` <sub>tool</sub>
+
+- Opt-in: listed as disabled until `SOCRATA_DATAFRAME_DROP_ENABLED=true`; also needs `CANVAS_PROVIDER_TYPE=duckdb`
+- Without `table_name`, drops the whole canvas — its `canvas_id` stops resolving for `socrata_dataframe_describe` and `socrata_dataframe_query`. With `table_name`, drops that one table and leaves the canvas and its other tables in place
+- Reports the dropped tables with their row counts and the tables still on the canvas
+- Deletes only the staged copy — `socrata_query_dataset` can stage the data again
+- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE` not set), `canvas_not_found` (unknown, expired, or already dropped), `table_not_found` (carries the canvas's `availableTables`)
 
 ---
 
@@ -283,9 +294,11 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424): `debug`, `info`, `notice`, `warning`, `error`. | `info` |
 | `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas spillover for large result sets. DuckDB ships with the server — no additional install required. | — |
+| `SOCRATA_DATAFRAME_DROP_ENABLED` | Set to `true` to enable `socrata_dataframe_drop`. Off, the tool is listed as disabled. | `false` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result (key-name redaction only). | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
@@ -327,7 +340,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point — registers tools, resources, prompts, and inits the Socrata service. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six tools covering portal listing, dataset search, schema fetch, SoQL query, and DataCanvas SQL. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven tools covering portal listing, dataset search, schema fetch, SoQL query, and DataCanvas SQL and cleanup. |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). Dataset metadata and portal catalog resources. |
 | `src/mcp-server/prompts` | Prompt definitions (`*.prompt.ts`). Civic data investigation workflow prompt. |
 | `src/services/socrata` | Socrata service layer — SODA 2.1 API client, Discovery API, query builder, type normalization. |

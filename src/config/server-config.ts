@@ -20,6 +20,12 @@ const ServerConfigSchema = z.object({
     .describe(
       'Default portal domain when domain is omitted from tool calls (e.g. data.seattle.gov, data.cityofnewyork.us).',
     ),
+  dataframeDropEnabled: z
+    .stringbool()
+    .default(false)
+    .describe(
+      'Enables socrata_dataframe_drop. Off by default: the tool stays listed as disabled until this is true.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -30,6 +36,7 @@ export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     appToken: 'SOCRATA_APP_TOKEN',
     defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
+    dataframeDropEnabled: 'SOCRATA_DATAFRAME_DROP_ENABLED',
   });
   return _config;
 }

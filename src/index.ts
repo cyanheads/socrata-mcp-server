@@ -10,6 +10,7 @@ import { exploreOpenData } from './mcp-server/prompts/definitions/explore-open-d
 import { datasetResource } from './mcp-server/resources/definitions/dataset.resource.js';
 import { portalsResource } from './mcp-server/resources/definitions/portals.resource.js';
 import { dataframeDescribe } from './mcp-server/tools/definitions/dataframe-describe.tool.js';
+import { dataframeDrop } from './mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQuery } from './mcp-server/tools/definitions/dataframe-query.tool.js';
 import { findDatasets } from './mcp-server/tools/definitions/find-datasets.tool.js';
 import { getDataset } from './mcp-server/tools/definitions/get-dataset.tool.js';
@@ -21,7 +22,15 @@ import { initSocrataService } from './services/socrata/socrata-service.js';
 await createApp({
   name: 'socrata-mcp-server',
   title: 'socrata-mcp-server',
-  tools: [findDatasets, getDataset, queryDataset, listPortals, dataframeDescribe, dataframeQuery],
+  tools: [
+    findDatasets,
+    getDataset,
+    queryDataset,
+    listPortals,
+    dataframeDescribe,
+    dataframeQuery,
+    dataframeDrop,
+  ],
   resources: [datasetResource, portalsResource],
   prompts: [exploreOpenData],
   // No handler gates on ctx.requestInput, so every tool answers in one round
