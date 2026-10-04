@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 20:33:50
+Generated on: 2026-10-04 05:56:30
 
 ```text
 socrata-mcp-server/
@@ -26,6 +26,7 @@ socrata-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -128,9 +129,11 @@ socrata-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
@@ -148,6 +151,7 @@ socrata-mcp-server/
 │   │   └── tools/
 │   │       ├── definitions/
 │   │       │   ├── dataframe-describe.tool.ts
+│   │       │   ├── dataframe-drop.tool.ts
 │   │       │   ├── dataframe-query.tool.ts
 │   │       │   ├── find-datasets.tool.ts
 │   │       │   ├── get-dataset.tool.ts
@@ -161,6 +165,8 @@ socrata-mcp-server/
 │   │   └── canvas-accessor.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
@@ -175,6 +181,8 @@ socrata-mcp-server/
 │   │   └── socrata-service.test.ts
 │   └── tools/
 │       ├── dataframe-describe.tool.test.ts
+│       ├── dataframe-drop.flag.test.ts
+│       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
 │       ├── find-datasets.tool.test.ts
 │       ├── get-dataset.tool.test.ts
