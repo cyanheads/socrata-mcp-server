@@ -36,7 +36,7 @@
         },
         {
           "name": "SOCRATA_DATAFRAME_DROP_ENABLED",
-          "description": "Set to true to enable socrata_dataframe_drop, which deletes staged DataCanvas data. Off, the tool is listed as disabled.",
+          "description": "Set to true to enable socrata_dataframe_drop, which deletes staged DataCanvas data. Off, the tool is omitted from the tool list.",
           "format": "boolean",
           "isRequired": false,
           "default": "false"
@@ -81,7 +81,7 @@
         },
         {
           "name": "SOCRATA_DATAFRAME_DROP_ENABLED",
-          "description": "Set to true to enable socrata_dataframe_drop, which deletes staged DataCanvas data. Off, the tool is listed as disabled.",
+          "description": "Set to true to enable socrata_dataframe_drop, which deletes staged DataCanvas data. Off, the tool is omitted from the tool list.",
           "format": "boolean",
           "isRequired": false,
           "default": "false"
