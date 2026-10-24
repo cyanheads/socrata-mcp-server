@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -25,7 +25,7 @@
 
 ## Overview
 
-Government open-data portals — searched and queried via the Socrata SODA 2.1 API and Discovery API. Discover portals and datasets, inspect typed column schemas, and run SoQL queries or DuckDB-powered SQL over large result sets, from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Query city, county, state, and federal open-data portals built on Socrata. Discover portals and datasets, inspect column schemas, and run SoQL queries, or SQL over large result sets.
 
 ### Tools
 
@@ -92,10 +92,11 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 - `search` for quick full-text lookup (`$q`), or combine `select`/`where`/`group`/`having`/`order` for full analytical control — clauses reference columns by API field name (`field_name` from `socrata_get_dataset`), never the display label; operators `=`, `!=`, `>`, `<`, `LIKE`, `IN(...)`, `BETWEEN`, `IS NULL`, `starts_with()`, `contains()`, `AND`, `OR`, `NOT`
 - Aggregation via `count(*)`, `sum()`, `avg()`, `min()`, `max()` with `group`/`having`
+- `not_tabular` identifies assets without queryable rows; search with `only: "datasets"`. `query_rejected` identifies a gateway refusal of query clauses when a bare row request succeeds; simplify the query and use SoQL `case(condition, value, true, fallback)` for conditional aggregates.
 - Up to 5000 rows per call with offset pagination; `total_count` returned when a plain row query is truncated (absent for grouped/aggregate queries)
 - `assembled_query` echoes the SoQL string for learning the syntax; all SODA 2.1 row values are strings except geo/location columns, which return nested objects
 - When `CANVAS_PROVIDER_TYPE=duckdb` and the page fills `limit`, up to 50,000 matching rows spill to a DataCanvas table whatever the `limit` (`canvas_id`, `table_name`, `canvas_row_count`) — list its columns with `socrata_dataframe_describe`, then run SQL with `socrata_dataframe_query`. A small `limit` (e.g. 10) stages a large match without a large inline page
-- Typed errors: `invalid_id`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`)
+- Typed errors: `not_tabular`, `query_rejected`, `invalid_id`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`)
 
 ---
 
@@ -110,21 +111,21 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 ### `socrata_dataframe_query` <sub>tool</sub>
 
-- SELECT-only SQL against a `canvas_id` table staged by `socrata_query_dataset`; DDL, DML, and file-reading functions (`read_csv`, `read_parquet`) are rejected
+- SELECT-only SQL against a `canvas_id` table staged by `socrata_query_dataset`; DDL, DML, file references, file-reading functions, and engine-setting functions (`current_schema`, `current_setting`) are rejected. Use direct table references instead of `query_table`; `query()` accepts only a single SQL string literal. Qualify a staged column named `current_schema` with its table (`t.current_schema`).
 - Spilled columns are typed from the SODA response headers: `number` columns (aggregate aliases included) are `DOUBLE`, so numeric comparisons work without a cast (`year > 2020`, `amount < 500`); text and timestamp columns stay `VARCHAR` — compare times with `CAST(date AS TIMESTAMP)`
 - Up to 10,000 rows per call, default 1000
-- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE` not set), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, system catalog access, or a denied function)
-- Works out of the box when `CANVAS_PROVIDER_TYPE=duckdb` is set — DuckDB ships as a regular dependency
+- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE=none`), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, system catalog access, or a denied function)
+- Works out of the box — DuckDB ships as a regular dependency and is enabled by default; `CANVAS_PROVIDER_TYPE=none` disables it
 
 ---
 
 ### `socrata_dataframe_drop` <sub>tool</sub>
 
-- Opt-in: listed as disabled until `SOCRATA_DATAFRAME_DROP_ENABLED=true`; also needs `CANVAS_PROVIDER_TYPE=duckdb`
+- Opt-in: omitted from the tool list until `SOCRATA_DATAFRAME_DROP_ENABLED=true`; also needs `CANVAS_PROVIDER_TYPE=duckdb`
 - Without `table_name`, drops the whole canvas — its `canvas_id` stops resolving for `socrata_dataframe_describe` and `socrata_dataframe_query`. With `table_name`, drops that one table and leaves the canvas and its other tables in place
 - Reports the dropped tables with their row counts and the tables still on the canvas
 - Deletes only the staged copy — `socrata_query_dataset` can stage the data again
-- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE` not set), `canvas_not_found` (unknown, expired, or already dropped), `table_not_found` (carries the canvas's `availableTables`)
+- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE=none`), `canvas_not_found` (unknown, expired, or already dropped), `table_not_found` (carries the canvas's `availableTables`)
 
 ---
 
@@ -166,7 +167,7 @@ Agent-friendly output:
 - Assembled SoQL string echoed in every `socrata_query_dataset` response so agents can learn and refine syntax
 - Recovery hints on empty results — echoes applied filters with specific suggestions for broadening
 - Truncation disclosure — `truncated`/`shown`/`cap` fields when rows fill the limit, with guidance to page or raise the limit, naming the staged table and both dataframe tools when the result spilled
-- Typed error reasons across every tool (`invalid_id`, `not_found`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
+- Typed error reasons across every tool (`invalid_id`, `not_found`, `not_tabular`, `query_rejected`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
 
 ## Getting started
 
@@ -174,18 +175,40 @@ Add the following to your MCP client configuration file.
 
 ### Public Hosted Instance
 
-A public instance is available at `https://socrata.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+A public instance is available at `https://socrata.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
+
+For Claude Code:
+
+```sh
+claude mcp add --transport http socrata-mcp-server https://socrata.caseyjhand.com/mcp
+```
+
+For Cline (`cline_mcp_settings.json`):
 
 ```json
 {
   "mcpServers": {
     "socrata-mcp-server": {
-      "type": "streamable-http",
+      "type": "streamableHttp",
       "url": "https://socrata.caseyjhand.com/mcp"
     }
   }
 }
 ```
+
+For Cursor (`mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "socrata-mcp-server": {
+      "url": "https://socrata.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+Claude Desktop adds remote servers under Settings → Connectors.
 
 ### Self-Hosted / Local
 
@@ -293,8 +316,8 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_SESSION_MODE` | Session handling: `stateful`, `stateless`, or `auto` (schema default `auto` resolves to stateful). This server sets it explicitly to stateless. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424): `debug`, `info`, `notice`, `warning`, `error`. | `info` |
-| `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas spillover for large result sets. DuckDB ships with the server — no additional install required. | — |
-| `SOCRATA_DATAFRAME_DROP_ENABLED` | Set to `true` to enable `socrata_dataframe_drop`. Off, the tool is listed as disabled. | `false` |
+| `CANVAS_PROVIDER_TYPE` | DataCanvas spillover for large result sets; `none` disables it. DuckDB ships with the server — no additional install required. | `duckdb` |
+| `SOCRATA_DATAFRAME_DROP_ENABLED` | Set to `true` to enable `socrata_dataframe_drop`. Off, the tool is omitted from the tool list. | `false` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |

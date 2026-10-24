@@ -1,6 +1,6 @@
 /**
  * @fileoverview DataCanvas drop tool — remove a whole canvas, or one table on it.
- * Opt-in via SOCRATA_DATAFRAME_DROP_ENABLED (listed as disabled otherwise); only
+ * Opt-in via SOCRATA_DATAFRAME_DROP_ENABLED (omitted from the tool list otherwise); only
  * meaningful when CANVAS_PROVIDER_TYPE=duckdb.
  * @module mcp-server/tools/definitions/dataframe-drop.tool
  */

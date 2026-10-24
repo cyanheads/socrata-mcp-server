@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 05:56:30
+Generated on: 2026-10-24 18:59:02
 
 ```text
 socrata-mcp-server/
@@ -190,7 +190,8 @@ socrata-mcp-server/
 │       ├── query-dataset.canvas.test.ts
 │       ├── query-dataset.tool.test.ts
 │       ├── security.test.ts
-│       └── upstream-errors.test.ts
+│       ├── upstream-errors.test.ts
+│       └── upstream-text.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

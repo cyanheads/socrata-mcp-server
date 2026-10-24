@@ -24,7 +24,7 @@ const ServerConfigSchema = z.object({
     .stringbool()
     .default(false)
     .describe(
-      'Enables socrata_dataframe_drop. Off by default: the tool stays listed as disabled until this is true.',
+      'Enables socrata_dataframe_drop. Off by default: the tool is omitted from the tool list until this is true.',
     ),
 });
 
