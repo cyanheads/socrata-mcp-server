@@ -39,6 +39,9 @@ const DISCOVERY_HOST = new URL(DISCOVERY_BASE).host;
  */
 const DISCOVERY_LOOKUP_TIMEOUT_MS = 2_500;
 
+/** One bare-row diagnostic on an already-failed query, without retries. */
+const QUERY_DIAGNOSTIC_TIMEOUT_MS = 2_500;
+
 /** A lowercase DNS hostname with at least one dot and an alphabetic (or punycode) TLD. */
 const HOSTNAME_PATTERN =
   /^(?=.{1,253}$)(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+(?:[a-z]{2,63}|xn--[a-z\d-]{1,59})$/;
@@ -526,6 +529,17 @@ export class SocrataService {
           // the only upstream locator surfaced.
           const detail = upstreamMessage(body);
           const sodaBody = isSodaErrorBody(body);
+          if (
+            response.status === 403 &&
+            sodaBody &&
+            detail === 'no row or column access to non-tabular tables'
+          ) {
+            throw validationError('This Socrata asset has no queryable rows (non-tabular asset).', {
+              host,
+              status: 403,
+              reason: 'not_tabular',
+            });
+          }
           if (response.status === 429) {
             throw await classifiedHttpError(
               errorResponse,
@@ -626,15 +640,25 @@ export class SocrataService {
     datasetId: string,
     ctx: Context,
     expected: ExpectedBody,
+    diagnoseQuery = false,
   ): Promise<{ body: T; headers: Headers }> {
     try {
       return await this.fetchJsonResponse<T>(url, ctx, expected);
     } catch (err) {
+      ctx.signal.throwIfAborted();
       if (!(err instanceof McpError) || err.data?.reason !== 'not_found') throw err;
       const foundOn = await this.lookupDatasetDomain(datasetId, ctx);
+      ctx.signal.throwIfAborted();
       const refused = err.data.status === 403;
       const onThisPortal = foundOn !== undefined && sameCatalogPortal(foundOn, domain);
       if (refused && onThisPortal) {
+        if (diagnoseQuery && (await this.acceptsBareRows(domain, datasetId, ctx))) {
+          throw validationError(
+            'The portal gateway rejected the query text; a bare row request to this dataset succeeded.',
+            { host: domain, status: 403, reason: 'query_rejected', dataset_id: datasetId },
+            { cause: err },
+          );
+        }
         throw notFound(
           `${domain} refused dataset ${datasetId} with HTTP 403 and a gateway page although the Discovery catalog lists it there: the host is not serving the SODA API to this server.`,
           { ...err.data, reason: 'unknown_domain', dataset_id: datasetId },
@@ -656,6 +680,34 @@ export class SocrataService {
     }
   }
 
+  /** A failed diagnostic is inconclusive; only a successful row array proves query sensitivity. */
+  private async acceptsBareRows(domain: string, datasetId: string, ctx: Context): Promise<boolean> {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), QUERY_DIAGNOSTIC_TIMEOUT_MS);
+    try {
+      const url = new URL(`https://${domain}/resource/${datasetId}.json`);
+      url.searchParams.set('$limit', '1');
+      const response = await fetch(url.toString(), {
+        headers: this.buildHeaders(),
+        signal: AbortSignal.any([ctx.signal, timeout.signal]),
+      });
+      ctx.signal.throwIfAborted();
+      if (!response.ok) return false;
+      const rows = parseJsonBody(await response.text());
+      ctx.signal.throwIfAborted();
+      return ROW_ARRAY.matches(rows);
+    } catch (err) {
+      ctx.signal.throwIfAborted();
+      ctx.log.debug('Bare-row gateway diagnostic was inconclusive', {
+        datasetId,
+        error: String(err),
+      });
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /**
    * Best-effort Discovery `?ids=` lookup of the portal that catalogs a dataset
    * ID. One attempt under its own short timeout; any failure (timeout, 429,
@@ -672,11 +724,14 @@ export class SocrataService {
         headers: this.buildHeaders(),
         signal: AbortSignal.any([timeout.signal, ctx.signal]),
       });
+      ctx.signal.throwIfAborted();
       if (!response.ok) return;
       const raw = (await response.json()) as { results?: { metadata?: { domain?: unknown } }[] };
+      ctx.signal.throwIfAborted();
       const domain = raw.results?.[0]?.metadata?.domain;
       return typeof domain === 'string' && domain ? domain : undefined;
     } catch (err) {
+      ctx.signal.throwIfAborted();
       ctx.log.debug('Discovery dataset-ID lookup failed', { datasetId, error: String(err) });
       return;
     } finally {
@@ -871,6 +926,7 @@ export class SocrataService {
       opts.datasetId,
       ctx,
       ROW_ARRAY,
+      [...params.keys()].some((key) => key !== '$limit' && key !== '$offset'),
     );
 
     // Fetch total count separately when result is at the limit (may be truncated).

@@ -246,6 +246,8 @@ describe('error contract propagation', () => {
     ['queryDataset', 'rate_limited', 'SOCRATA_APP_TOKEN'],
     // No socrataCode → the declared generic soql_error recovery.
     ['queryDataset', 'soql_error', 'field_name'],
+    ['queryDataset', 'not_tabular', 'only: "datasets"'],
+    ['queryDataset', 'query_rejected', 'case(condition, value'],
   ] as const)('%s attaches the declared %s recovery hint', async (tool, reason, hintFragment) => {
     const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
     const upstream = new McpError(JsonRpcErrorCode.NotFound, 'upstream failure', { reason });

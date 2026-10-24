@@ -19,6 +19,7 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
+        "CANVAS_PROVIDER_TYPE": "none",
         "NODE_ENV": "production",
         "SOCRATA_APP_TOKEN": "${user_config.SOCRATA_APP_TOKEN}",
         "SOCRATA_DEFAULT_DOMAIN": "${user_config.SOCRATA_DEFAULT_DOMAIN}"

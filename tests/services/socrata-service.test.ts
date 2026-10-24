@@ -112,6 +112,48 @@ describe('SocrataService.fetchJson error classification', () => {
     vi.clearAllMocks();
   });
 
+  it('characterizes generic row permission failures without probing Discovery', async () => {
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(
+          { code: 'permission_denied', error: true, message: 'Permission denied' },
+          403,
+          'Forbidden',
+        ),
+      ),
+    );
+    const err = await rejectionOf(
+      svc.queryDataset(
+        { domain: 'data.cityofnewyork.us', datasetId: 'smk3-tmxj' },
+        createMockContext(),
+      ),
+    );
+    expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(err.data?.reason).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies the non-tabular HTTP 403 marker without a retry (#42)', async () => {
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(
+          { error: true, message: 'no row or column access to non-tabular tables' },
+          403,
+          'Forbidden',
+        ),
+      ),
+    );
+    const err = await rejectionOf(
+      svc.queryDataset(
+        { domain: 'data.cityofnewyork.us', datasetId: 'smk3-tmxj' },
+        createMockContext(),
+      ),
+    );
+    expect(err.data).toMatchObject({ reason: 'not_tabular', status: 403 });
+    expect(err.message).toContain('no queryable rows');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('maps a 400 query-coordinator body (errorCode key) to soql_error with the upstream message', async () => {
     // Real upstream shape from data.cityofchicago.org — this family uses `errorCode`.
     fetchSpy.mockResolvedValue(
@@ -2015,6 +2057,164 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
   });
 
   describe('a 403 from a gateway instead of the SODA API (#39)', () => {
+    it.each(['select', 'where', 'search', 'group', 'having', 'order'] as const)(
+      'diagnoses a gateway rejection of %s with one bare control (#45)',
+      async (clause) => {
+        fetchSpy.mockImplementation((input) => {
+          const url = new URL(String(input));
+          if (url.origin === DISCOVERY_ORIGIN)
+            return Promise.resolve(discoveryIdsResponse('data.cityofnewyork.us'));
+          return Promise.resolve(
+            url.search === '?%24limit=1' ? jsonResponse([], 200, 'OK') : gateway403(),
+          );
+        });
+        const err = await rejectionOf(
+          svc.queryDataset(
+            {
+              domain: 'data.cityofnewyork.us',
+              datasetId: 'erm2-nwe9',
+              [clause]: 'x',
+              limit: 5,
+              offset: 10,
+            },
+            createMockContext(),
+          ),
+        );
+        expect(err.data?.reason).toBe('query_rejected');
+        expect(err.message).toContain('query text');
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+        expect(new URL(String(fetchSpy.mock.calls[2]![0])).searchParams.toString()).toBe(
+          '%24limit=1',
+        );
+      },
+    );
+
+    it.each([403, 429, 500, 200])(
+      'preserves unknown_domain after an inconclusive/refused diagnostic HTTP %s (#45)',
+      async (status) => {
+        fetchSpy.mockImplementation((input) => {
+          const url = new URL(String(input));
+          if (url.origin === DISCOVERY_ORIGIN)
+            return Promise.resolve(discoveryIdsResponse('data.cityofnewyork.us'));
+          return Promise.resolve(
+            url.search === '?%24limit=1'
+              ? jsonResponse({ not: 'rows' }, status, 'Control')
+              : gateway403(),
+          );
+        });
+        const err = await rejectionOf(
+          svc.queryDataset(
+            { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', select: 'x' },
+            createMockContext(),
+          ),
+        );
+        expect(err.data?.reason).toBe('unknown_domain');
+        expect(err.cause).toMatchObject({
+          code: JsonRpcErrorCode.NotFound,
+          data: { reason: 'not_found', status: 403, host: 'data.cityofnewyork.us' },
+          message:
+            'data.cityofnewyork.us refused the request with HTTP 403 and a gateway page instead of a Socrata error.',
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      },
+    );
+
+    it.each(['discovery', 'diagnostic'])(
+      'propagates caller cancellation during %s (#45)',
+      async (seam) => {
+        const controller = new AbortController();
+        const cancellation = new DOMException('Caller cancelled the query', 'AbortError');
+        fetchSpy.mockImplementation((input) => {
+          const url = new URL(String(input));
+          if (
+            (seam === 'discovery' && url.origin === DISCOVERY_ORIGIN) ||
+            (seam === 'diagnostic' && url.search === '?%24limit=1')
+          ) {
+            controller.abort(cancellation);
+            return Promise.reject(cancellation);
+          }
+          return Promise.resolve(
+            url.origin === DISCOVERY_ORIGIN
+              ? discoveryIdsResponse('data.cityofnewyork.us')
+              : gateway403(),
+          );
+        });
+        await expect(
+          svc.queryDataset(
+            { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', select: 'x' },
+            createMockContext({ signal: controller.signal }),
+          ),
+        ).rejects.toBe(cancellation);
+        expect(fetchSpy).toHaveBeenCalledTimes(seam === 'discovery' ? 2 : 3);
+      },
+    );
+
+    it.each(['discovery', 'diagnostic'] as const)(
+      'preserves cancellation when %s returns refused headers (#45)',
+      async (seam) => {
+        const controller = new AbortController();
+        const cancellation = new DOMException('Caller cancelled at response headers', 'AbortError');
+        fetchSpy.mockImplementation((input) => {
+          const url = new URL(String(input));
+          if (
+            (seam === 'discovery' && url.origin === DISCOVERY_ORIGIN) ||
+            (seam === 'diagnostic' && url.search === '?%24limit=1')
+          ) {
+            controller.abort(cancellation);
+            return Promise.resolve(gateway403());
+          }
+          return Promise.resolve(
+            url.origin === DISCOVERY_ORIGIN
+              ? discoveryIdsResponse('data.cityofnewyork.us')
+              : gateway403(),
+          );
+        });
+        await expect(
+          svc.queryDataset(
+            { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', select: 'x' },
+            createMockContext({ signal: controller.signal }),
+          ),
+        ).rejects.toBe(cancellation);
+        expect(fetchSpy).toHaveBeenCalledTimes(seam === 'discovery' ? 2 : 3);
+      },
+    );
+
+    it('bounds a stalled diagnostic without retrying (#45)', async () => {
+      vi.useFakeTimers();
+      fetchSpy.mockImplementation((input, init) => {
+        const url = new URL(String(input));
+        if (url.origin === DISCOVERY_ORIGIN)
+          return Promise.resolve(discoveryIdsResponse('data.cityofnewyork.us'));
+        if (url.search === '?%24limit=1')
+          return new Promise((_resolve, reject) =>
+            init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), {
+              once: true,
+            }),
+          );
+        return Promise.resolve(gateway403());
+      });
+      const pending = rejectionOf(
+        svc.queryDataset(
+          { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', select: 'x' },
+          createMockContext(),
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(2500);
+      const err = await pending;
+      expect(err.data?.reason).toBe('unknown_domain');
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    });
+    it('characterizes a refused bare row request with offset as unknown_domain', async () => {
+      route('data.cityofberkeley.info');
+      const err = await rejectionOf(
+        svc.queryDataset(
+          { domain: 'data.cityofberkeley.info', datasetId: 'zzzz-9999', limit: 1, offset: 2 },
+          createMockContext(),
+        ),
+      );
+      expect(err.data?.reason).toBe('unknown_domain');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
     /** SODA answers the gateway 403; Discovery places the ID on `holder` (nowhere when omitted). */
     function route(holder?: string) {
       fetchSpy.mockImplementation((input) =>

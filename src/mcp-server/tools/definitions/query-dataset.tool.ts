@@ -198,6 +198,20 @@ export const queryDataset = tool('socrata_query_dataset', {
 
   errors: [
     {
+      reason: 'query_rejected',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The gateway refused query clauses but a bare row request succeeded.',
+      recovery:
+        "Simplify the query and use SoQL syntax; conditional aggregates use case(condition, value, true, fallback), for example sum(case(status = 'Closed', 1, true, 0)).",
+    },
+    {
+      reason: 'not_tabular',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'SODA returned the non-tabular asset access error.',
+      recovery:
+        'Find a queryable table with socrata_find_datasets using only: "datasets", then retry with its dataset_id and domain.',
+    },
+    {
       reason: 'invalid_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Dataset ID does not match the four-by-four pattern.',
@@ -292,6 +306,8 @@ export const queryDataset = tool('socrata_query_dataset', {
         const { reason, found_on_domain: foundOn, socrataCode, column } = data;
         if (
           reason === 'not_found' ||
+          reason === 'not_tabular' ||
+          reason === 'query_rejected' ||
           reason === 'unknown_domain' ||
           reason === 'invalid_domain' ||
           reason === 'soql_error' ||
@@ -328,7 +344,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     if (canvas && filled) {
       try {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        const tableName = `${input.dataset_id.replaceAll('-', '_')}_rows`;
+        const tableName = `${/^[0-9]/.test(input.dataset_id) ? 't_' : ''}${input.dataset_id.replaceAll('-', '_')}_rows`;
         // Stage the wider matching set, not just this page: drain paginated SODA
         // calls up to the safety cap. The inline `rows` above stay bounded by
         // input.limit; only this spilled copy holds the wider set the canvas

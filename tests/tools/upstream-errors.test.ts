@@ -198,6 +198,83 @@ describe('rate_limited on every tool that declares it (#27)', () => {
 });
 
 describe('URL-shaped and malformed domains (#35)', () => {
+  it('exposes query_rejected with SoQL recovery on both surfaces (#45)', async () => {
+    fetchSpy.mockImplementation((input) => {
+      const url = new URL(String(input));
+      if (url.origin === DISCOVERY_ORIGIN)
+        return Promise.resolve(idsAnswer('data.cityofnewyork.us'));
+      return Promise.resolve(
+        url.search === '?%24limit=1' ? json([{ status: 'Closed' }]) : html(403),
+      );
+    });
+    const { error, text } = errorOf(
+      await runToolContract(queryDataset, {
+        domain: 'data.cityofnewyork.us',
+        dataset_id: 'erm2-nwe9',
+        select: "sum(case when status='Closed' then 1 else 0 end)",
+        limit: 5,
+      }),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('query_rejected');
+    expect(error.data.recovery?.hint).toContain('case(condition, value');
+    expect(text).toContain('reason query_rejected');
+    expect(text).toContain('case(condition, value');
+    expect(JSON.stringify(error)).not.toContain('DOCTYPE');
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['discovery', 'diagnostic', 'diagnostic headers'])(
+    'renders cancellation, not hostname advice, during %s (#45)',
+    async (seam) => {
+      const controller = new AbortController();
+      fetchSpy.mockImplementation((input) => {
+        const url = new URL(String(input));
+        if (
+          (seam === 'discovery' && url.origin === DISCOVERY_ORIGIN) ||
+          (seam !== 'discovery' && url.search === '?%24limit=1')
+        ) {
+          const error = new DOMException('Caller cancelled the query', 'AbortError');
+          controller.abort(error);
+          if (seam === 'diagnostic headers') return Promise.resolve(html(403));
+          return Promise.reject(error);
+        }
+        return Promise.resolve(
+          url.origin === DISCOVERY_ORIGIN ? idsAnswer('data.cityofnewyork.us') : html(403),
+        );
+      });
+      const { error, text } = errorOf(
+        await runToolContract(
+          queryDataset,
+          { domain: 'data.cityofnewyork.us', dataset_id: 'erm2-nwe9', select: 'agency' },
+          { context: { signal: controller.signal } },
+        ),
+      );
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(error.message).toContain('Caller cancelled the query');
+      expect(text).toContain('Caller cancelled the query');
+      expect(text).not.toContain('hostname');
+    },
+  );
+  it('exposes not_tabular and dataset-only recovery on both surfaces (#42)', async () => {
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(
+        json({ error: true, message: 'no row or column access to non-tabular tables' }, 403),
+      ),
+    );
+    const { error, text } = errorOf(
+      await runToolContract(queryDataset, {
+        domain: 'data.cityofnewyork.us',
+        dataset_id: 'smk3-tmxj',
+        limit: 1,
+      }),
+    );
+    expect(error.data.reason).toBe('not_tabular');
+    expect(error.data.recovery?.hint).toContain('only: "datasets"');
+    expect(text).toContain('reason not_tabular');
+    expect(text).toContain('only: "datasets"');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
   it('socrata_query_dataset reports the normalized domain on both surfaces', async () => {
     fetchSpy.mockImplementation(() => Promise.resolve(json([{ a: '1' }])));
 

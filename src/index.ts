@@ -6,6 +6,7 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { normalizeEnv, parseConfig, resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { exploreOpenData } from './mcp-server/prompts/definitions/explore-open-data.prompt.js';
 import { datasetResource } from './mcp-server/resources/definitions/dataset.resource.js';
 import { portalsResource } from './mcp-server/resources/definitions/portals.resource.js';
@@ -18,6 +19,13 @@ import { listPortals } from './mcp-server/tools/definitions/list-portals.tool.js
 import { queryDataset } from './mcp-server/tools/definitions/query-dataset.tool.js';
 import { setCanvas } from './services/canvas-accessor.js';
 import { initSocrataService } from './services/socrata/socrata-service.js';
+
+parseConfig();
+// DataCanvas defaults on; set CANVAS_PROVIDER_TYPE=none to disable it.
+process.env.CANVAS_PROVIDER_TYPE =
+  normalizeEnv({ CANVAS_PROVIDER_TYPE: process.env.CANVAS_PROVIDER_TYPE }).CANVAS_PROVIDER_TYPE ??
+  'duckdb';
+resetConfig();
 
 await createApp({
   name: 'socrata-mcp-server',
@@ -47,7 +55,7 @@ await createApp({
     'All SODA 2.1 row values are strings. Column data_type from socrata_get_dataset determines WHERE quoting:\n' +
     '  Number columns: bare literals (year=2023)\n' +
     "  Text columns: single-quoted strings (year='2023')\n" +
-    'Set SOCRATA_APP_TOKEN for higher rate limits. Set CANVAS_PROVIDER_TYPE=duckdb for SQL analytics on large result sets.',
+    'Set SOCRATA_APP_TOKEN for higher rate limits. Large result sets spill to DataCanvas for SQL via socrata_dataframe_query.',
   setup(core) {
     initSocrataService();
     // Canvas lives on CoreServices, not on the per-request Context — expose it

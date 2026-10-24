@@ -50,10 +50,14 @@ let canvas: DataCanvas;
  * Answer every SODA resource request: the `count(*)` recount with the total,
  * any other request with the `$offset`/`$limit` slice of `rows` and `headers`.
  */
-function serveSoda(rows: Record<string, unknown>[], headers: Record<string, string>) {
+function serveSoda(
+  rows: Record<string, unknown>[],
+  headers: Record<string, string>,
+  datasetId = 'ijzp-q8t2',
+) {
   fetchMock = createFetchMock([
     {
-      match: /\/resource\/ijzp-q8t2\.json/,
+      match: (request) => new URL(request.url).pathname === `/resource/${datasetId}.json`,
       respond: (request) => {
         const params = new URL(request.url).searchParams;
         if (params.get('$select') === 'count(*)') {
@@ -117,6 +121,63 @@ afterAll(async () => {
 });
 
 describe('socrata_query_dataset spill on a DuckDB canvas', () => {
+  it('stages a second page after a nonzero offset under the digit prefix (#44)', async () => {
+    serveSoda(
+      Array.from({ length: 5002 }, (_, i) => ({ id: String(i + 1) })),
+      { 'X-SODA2-Fields': '["id"]', 'X-SODA2-Types': '["number"]' },
+      '43nn-pn8j',
+    );
+    const { result } = await spill({ dataset_id: '43nn-pn8j', offset: 1, limit: 1 });
+    expect(result.rows).toEqual([{ id: '2' }]);
+    expect(result.canvas_row_count).toBe(5001);
+    const bounds = await sql(
+      result.canvas_id!,
+      `SELECT min(id) as lo, max(id) as hi, count(*) as n FROM t_43nn_pn8j_rows`,
+    );
+    expect(bounds.rows[0]).toEqual({ lo: 2, hi: 5002, n: '5001' });
+  });
+  it.each([
+    ['43nn-pn8j', 't_43nn_pn8j_rows'],
+    ['ijzp-q8t2', 'ijzp_q8t2_rows'],
+  ])(
+    'stages %s with a stable valid name and preserves system-field projection (#44)',
+    async (datasetId, tableName) => {
+      const rows = [
+        { id: '1', ':@computed_region_x': '9' },
+        { id: '2', ':@computed_region_x': '8' },
+      ];
+      serveSoda(
+        rows,
+        {
+          'X-SODA2-Fields': '["id",":@computed_region_x"]',
+          'X-SODA2-Types': '["number","number"]',
+        },
+        datasetId,
+      );
+      const { result } = await spill({ dataset_id: datasetId, limit: 1 });
+      expect(result.table_name).toBe(tableName);
+      expect(result.rows).toEqual([rows[0]]);
+      expect(result.canvas_row_count).toBe(2);
+      expect(await describeTypes(result.canvas_id!)).toEqual({ id: 'DOUBLE' });
+      const counted = await sql(result.canvas_id!, `SELECT count(*) as n FROM ${tableName}`);
+      expect(String(counted.rows[0]!.n)).toBe('2');
+      const text = queryDataset.format!(result)
+        .map((c) => ('text' in c ? c.text : ''))
+        .join('\n');
+      expect(text).toContain(tableName);
+      expect(text).toContain(':@computed_region_x');
+    },
+  );
+  it('characterizes below-limit and offset-past-end results without a spill', async () => {
+    serveSoda([{ id: '1' }], { 'X-SODA2-Fields': '["id"]', 'X-SODA2-Types': '["number"]' });
+    const full = await spill({ limit: 2 });
+    expect(full.result.rows).toEqual([{ id: '1' }]);
+    expect(full.result.canvas_id).toBeUndefined();
+    const empty = await spill({ limit: 1, offset: 2 });
+    expect(empty.result.rows).toEqual([]);
+    expect(empty.result.canvas_id).toBeUndefined();
+    expect(getEnrichment(empty.ctx).notice).toContain('No rows');
+  });
   it('stages SODA number columns as DOUBLE, so numeric comparisons need no cast (#25)', async () => {
     serveSoda(CRIMES, CRIME_HEADERS);
     const { result } = await spill({ limit: 2 });
