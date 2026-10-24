@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
   escapeTableCell,
@@ -186,16 +187,17 @@ export const getDataset = tool('socrata_get_dataset', {
     // Dataset name, description, and column descriptions are upstream-controlled —
     // render the name quoted on a single line, the description as a labeled
     // blockquote, and table cells escaped for pipes and newlines.
-    lines.push(`## "${inlineUpstream(result.name)}"`);
+    lines.push(`## "${escapeMarkdownInline(inlineUpstream(result.name))}"`);
     lines.push(`**ID:** ${result.dataset_id} | **Domain:** ${result.domain}`);
-    if (result.category) lines.push(`**Category:** ${result.category}`);
-    if (result.tags.length) lines.push(`**Tags:** ${result.tags.join(', ')}`);
+    if (result.category) lines.push(`**Category:** ${escapeMarkdownInline(result.category)}`);
+    if (result.tags.length)
+      lines.push(`**Tags:** ${result.tags.map(escapeMarkdownInline).join(', ')}`);
     if (result.row_count != null) {
       const source = result.row_count_source ? ` (source: ${result.row_count_source})` : '';
       lines.push(`**Rows (approx.):** ${result.row_count.toLocaleString()}${source}`);
     }
     if (result.data_updated_at) lines.push(`**Last updated:** ${result.data_updated_at}`);
-    if (result.license) lines.push(`**License:** ${result.license}`);
+    if (result.license) lines.push(`**License:** ${escapeMarkdownInline(result.license)}`);
     if (result.description) {
       lines.push('');
       lines.push(...upstreamBlockquote('Upstream dataset description', result.description));

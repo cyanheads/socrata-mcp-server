@@ -10,6 +10,8 @@
  * @module mcp-server/tools/upstream-text
  */
 
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+
 const TRUNCATION_MARKER = '… [truncated]';
 
 /**
@@ -26,16 +28,11 @@ export function inlineUpstream(text: string, maxChars?: number): string {
 
 /**
  * Escape upstream text for a markdown table cell: newlines collapse to spaces
- * (a raw newline ends the row), and backslashes then pipes are backslash-escaped
- * (a raw pipe splits the cell; GFM pairs `\` with the following character during
- * cell splitting, so an upstream `\|` would otherwise re-arm the pipe as a
- * delimiter).
+ * (a raw newline ends the row), while Markdown punctuation and backslashes
+ * that would escape it stay literal after parsing.
  */
 export function escapeTableCell(value: string): string {
-  return value
-    .replace(/\r\n|[\r\n]/g, ' ')
-    .replace(/\\/g, '\\\\')
-    .replace(/\|/g, '\\|');
+  return escapeMarkdownInline(value.replace(/\r\n|[\r\n]/g, ' '));
 }
 
 /**
@@ -48,7 +45,7 @@ export function upstreamBlockquote(label: string, text: string): string[] {
     .replace(/\r\n|\r/g, '\n')
     .trim()
     .split('\n')
-    .map((line) => (line.length > 0 ? `> ${line}` : '>'));
+    .map((line) => (line.length > 0 ? `> ${escapeMarkdownInline(line)}` : '>'));
   return [`**${label}:**`, ...quoted];
 }
 

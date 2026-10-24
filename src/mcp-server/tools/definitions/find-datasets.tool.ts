@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { inlineUpstream, upstreamBlockquote } from '@/mcp-server/tools/upstream-text.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
@@ -209,10 +210,10 @@ export const findDatasets = tool('socrata_find_datasets', {
     for (const ds of result.results) {
       // Dataset names and descriptions are upstream-controlled — render names
       // quoted on a single line and descriptions as labeled blockquotes.
-      lines.push(`### "${inlineUpstream(ds.name)}"`);
+      lines.push(`### "${escapeMarkdownInline(inlineUpstream(ds.name))}"`);
       lines.push(`**ID:** ${ds.dataset_id} | **Domain:** ${ds.domain}`);
-      if (ds.category != null) lines.push(`**Category:** ${ds.category}`);
-      if (ds.tags.length) lines.push(`**Tags:** ${ds.tags.join(', ')}`);
+      if (ds.category != null) lines.push(`**Category:** ${escapeMarkdownInline(ds.category)}`);
+      if (ds.tags.length) lines.push(`**Tags:** ${ds.tags.map(escapeMarkdownInline).join(', ')}`);
       if (ds.description != null) {
         // Trailing blank line seals the blockquote — without it a following
         // metadata line would be a lazy continuation of the quote.
@@ -221,11 +222,13 @@ export const findDatasets = tool('socrata_find_datasets', {
       if (ds.column_names.length) {
         // Render the full column list structuredContent carries — a render-only
         // slice here would drop names content[]-reading clients can't recover.
-        lines.push(`**Columns (field names):** ${ds.column_names.join(', ')}`);
+        lines.push(
+          `**Columns (field names):** ${ds.column_names.map(escapeMarkdownInline).join(', ')}`,
+        );
       }
       if (ds.data_updated_at != null) lines.push(`**Last updated:** ${ds.data_updated_at}`);
       if (ds.view_count != null) lines.push(`**Views:** ${ds.view_count}`);
-      if (ds.license != null) lines.push(`**License:** ${ds.license}`);
+      if (ds.license != null) lines.push(`**License:** ${escapeMarkdownInline(ds.license)}`);
       lines.push('');
     }
 
