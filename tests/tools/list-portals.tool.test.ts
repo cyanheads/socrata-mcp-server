@@ -29,6 +29,16 @@ beforeEach(() => {
 });
 
 describe('listPortals', () => {
+  it('renders Markdown query syntax as literal text in the empty-result notice', async () => {
+    const ctx = createMockContext({ errors: listPortals.errors });
+    await listPortals.handler(listPortals.input.parse({ query: '[x](https://example.com)' }), ctx);
+    expect(getEnrichment(ctx)).toEqual({
+      totalCount: 0,
+      notice:
+        'No portals matched "\\[x\\](https://example.com)". Try a broader term or omit the query to list all portals.',
+    });
+  });
+
   it('returns all portals when no filter is applied', async () => {
     const ctx = createMockContext({ errors: listPortals.errors });
     const input = listPortals.input.parse({});

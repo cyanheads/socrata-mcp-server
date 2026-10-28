@@ -47,6 +47,25 @@ afterEach(() => {
 });
 
 describe('queryDataset', () => {
+  it('escapes Markdown in an empty-result WHERE notice without changing the executed query', async () => {
+    const ctx = createMockContext({ errors: queryDataset.errors });
+    mockQueryDataset.mockResolvedValue({
+      rows: [],
+      rowCount: 0,
+      domain: 'data.seattle.gov',
+      assembledQuery: "$where=name='*none*'",
+    });
+    const result = await queryDataset.handler(
+      queryDataset.input.parse({ dataset_id: 'kzjm-xkqj', where: "name='*none*'" }),
+      ctx,
+    );
+    expect(result.assembled_query).toBe("$where=name='*none*'");
+    expect(getEnrichment(ctx).notice).toBe(
+      'No rows returned for dataset "kzjm-xkqj" with WHERE name=\'\\*none\\*\'. Check field names and quoting with socrata_get_dataset, or broaden the filter.',
+    );
+    expect(mockQueryDataset.mock.calls[0]?.[0].where).toBe("name='*none*'");
+  });
+
   it('states that SoQL takes the API field name in the description and clause describes (#29)', () => {
     expect(queryDataset.description).toContain('API field name');
     const { shape } = queryDataset.input;

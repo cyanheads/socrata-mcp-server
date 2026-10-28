@@ -22,6 +22,21 @@ beforeEach(() => {
 });
 
 describe('findDatasets', () => {
+  it('escapes caller filters in authored notices while retaining the raw query echo', async () => {
+    const ctx = createMockContext({ errors: findDatasets.errors });
+    mockFindDatasets.mockResolvedValue({ results: [], totalCount: 0 });
+    await findDatasets.handler(
+      findDatasets.input.parse({ query: '[x](https://example.com)', tags: ['*tag*'] }),
+      ctx,
+    );
+    expect(getEnrichment(ctx)).toEqual({
+      totalCount: 0,
+      effectiveQuery: '[x](https://example.com)',
+      notice:
+        'No datasets matched with query="\\[x\\](https://example.com)", tags=\\*tag\\*. Try broader search terms, remove category/tag filters, or omit domain to search all portals.',
+    });
+  });
+
   it('returns results for a basic query', async () => {
     const ctx = createMockContext({ errors: findDatasets.errors });
     mockFindDatasets.mockResolvedValue({

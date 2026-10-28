@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const PortalEntrySchema = z
@@ -83,7 +84,7 @@ export const listPortals = tool('socrata_list_portals', {
     if (page.length === 0) {
       ctx.enrich.notice(
         queryFilter
-          ? `No portals matched "${input.query}". Try a broader term or omit the query to list all portals.`
+          ? `No portals matched "${escapeMarkdownInline(input.query ?? '')}". Try a broader term or omit the query to list all portals.`
           : 'No portals available.',
       );
       return { portals: [] };

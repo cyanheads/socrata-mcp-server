@@ -10,6 +10,7 @@ import {
   inferSchemaFromRows,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { escapeTableCell, fencedJson, inlineUpstream } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
@@ -332,8 +333,7 @@ export const queryDataset = tool('socrata_query_dataset', {
 
     if (qResult.rowCount === 0) {
       ctx.enrich.notice(
-        `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${where}` : ''}. ` +
-          'Check field names and quoting with socrata_get_dataset, or broaden the filter.',
+        `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${escapeMarkdownInline(where)}` : ''}. Check field names and quoting with socrata_get_dataset, or broaden the filter.`,
       );
     }
 

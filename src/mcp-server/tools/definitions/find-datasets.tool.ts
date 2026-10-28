@@ -176,8 +176,7 @@ export const findDatasets = tool('socrata_find_datasets', {
       if (input.tags?.length) filtersApplied.push(`tags=${input.tags.join(',')}`);
 
       ctx.enrich.notice(
-        `No datasets matched${filtersApplied.length ? ` with ${filtersApplied.join(', ')}` : ''}. ` +
-          'Try broader search terms, remove category/tag filters, or omit domain to search all portals.',
+        `No datasets matched${filtersApplied.length ? ` with ${escapeMarkdownInline(filtersApplied.join(', '))}` : ''}. Try broader search terms, remove category/tag filters, or omit domain to search all portals.`,
       );
       return { results: [] };
     }
