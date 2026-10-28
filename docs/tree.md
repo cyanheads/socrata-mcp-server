@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 07:10:04
+Generated on: 2026-10-28 07:27:29
 
 ```text
 socrata-mcp-server/
@@ -28,6 +28,7 @@ socrata-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -185,6 +186,8 @@ socrata-mcp-server/
 │   ├── prompts/
 │   │   └── explore-open-data.prompt.test.ts
 │   ├── resources/
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
 │   │   └── socrata-service.test.ts
 │   └── tools/
