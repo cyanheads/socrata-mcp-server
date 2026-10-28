@@ -30,6 +30,7 @@ resetConfig();
 await createApp({
   name: 'socrata-mcp-server',
   title: 'socrata-mcp-server',
+  skills: 'skills',
   tools: [
     findDatasets,
     getDataset,

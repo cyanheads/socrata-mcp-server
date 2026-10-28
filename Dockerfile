@@ -29,6 +29,9 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # Copy the rest of the source code
 COPY . .
 
+# Published skills are loaded from the application root at runtime.
+RUN mkdir -p skills
+
 # Build the application
 RUN bun run build
 
@@ -123,7 +126,7 @@ ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
-LABEL org.opencontainers.image.title="@cyanheads/socrata-mcp-server"
+LABEL org.opencontainers.image.title="socrata-mcp-server"
 LABEL org.opencontainers.image.description="Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
@@ -136,6 +139,7 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/skills ./skills
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.

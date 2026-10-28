@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/socrata-mcp-server</h1>
   <p><b>Search and query government open-data portals (Socrata SODA API) via MCP. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 2 Resources • 1 Prompt</div>
+  <div>7 Tools • 2 Data Resources • 1 Prompt • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/socrata-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fsocrata-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/socrata-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -53,6 +53,10 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 | Prompt | Description |
 |:---|:---|
 | `explore_open_data` | Structured six-step civic data investigation workflow: find portal → discover datasets → inspect schema → query → aggregate → synthesize |
+
+### Agent skill
+
+[`socrata-guide`](skills/socrata-guide/SKILL.md) covers dataset coverage checks, SoQL and DuckDB query syntax, and comparisons across staged tables. It ships with plugin installs, npm, Docker, and the MCPB bundle, and is available over MCP as `skill://socrata-guide/SKILL.md`.
 
 ## Capability reference
 
@@ -171,137 +175,32 @@ Agent-friendly output:
 
 ## Getting started
 
-Add the following to your MCP client configuration file.
-
-### Public Hosted Instance
-
-A public instance is available at `https://socrata.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
-
-For Claude Code:
+Connect to the hosted instance, no install:
 
 ```sh
 claude mcp add --transport http socrata-mcp-server https://socrata.caseyjhand.com/mcp
 ```
 
-For Cline (`cline_mcp_settings.json`):
+Or run it locally:
 
-```json
-{
-  "mcpServers": {
-    "socrata-mcp-server": {
-      "type": "streamableHttp",
-      "url": "https://socrata.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add socrata-mcp-server -- npx -y @cyanheads/socrata-mcp-server
 ```
 
-For Cursor (`mcp.json`):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "socrata-mcp-server": {
-      "url": "https://socrata.caseyjhand.com/mcp"
-    }
-  }
-}
-```
-
-Claude Desktop adds remote servers under Settings → Connectors.
-
-### Self-Hosted / Local
-
-```json
-{
-  "mcpServers": {
-    "socrata-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/socrata-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-Or with npx (no Bun required):
-
-```json
-{
-  "mcpServers": {
-    "socrata-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/socrata-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/socrata-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "socrata-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "ghcr.io/cyanheads/socrata-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- Optional: A Socrata app token — register for free at any portal (e.g. [data.seattle.gov](https://data.seattle.gov)) to get higher rate limits (10 req/s per token vs. shared throttled pool without one).
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/socrata-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd socrata-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# edit .env and set SOCRATA_APP_TOKEN if you have one
-```
+An optional `SOCRATA_APP_TOKEN` from a [Socrata portal](https://data.seattle.gov) raises rate limits. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -326,6 +225,16 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ## Running the server
+
+Requires [Bun v1.4.0+](https://bun.sh/) or Node.js v24+.
+
+```sh
+git clone https://github.com/cyanheads/socrata-mcp-server.git
+cd socrata-mcp-server
+bun install
+cp .env.example .env
+# Set SOCRATA_APP_TOKEN in .env if you have one.
+```
 
 ### Local development
 
@@ -367,6 +276,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). Dataset metadata and portal catalog resources. |
 | `src/mcp-server/prompts` | Prompt definitions (`*.prompt.ts`). Civic data investigation workflow prompt. |
 | `src/services/socrata` | Socrata service layer — SODA 2.1 API client, Discovery API, query builder, type normalization. |
+| `skills/` | Published guide for agents investigating civic data with the server. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide

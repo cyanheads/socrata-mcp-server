@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-10-24 19:16:55
+Generated on: 2026-10-28 07:10:04
 
 ```text
 socrata-mcp-server/
@@ -40,6 +40,8 @@ socrata-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -138,6 +140,11 @@ socrata-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── socrata-guide/
+│       ├── references/
+│       │   └── query-syntax.md
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -209,7 +216,9 @@ socrata-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
