@@ -12,14 +12,14 @@
       "url": "https://socrata.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.5.0",
+  "version": "0.5.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "environmentVariables": [
         {
           "name": "SOCRATA_APP_TOKEN",
@@ -58,7 +58,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/socrata-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",

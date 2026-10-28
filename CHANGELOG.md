@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-10-28
+
+Publishes the Socrata guide and framework maintenance with accurate discovery search echo notes.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
 
 Adds the Socrata analysis guide over MCP, preserves SDK runtime modules in desktop bundles, and updates the framework to 0.13.18.
