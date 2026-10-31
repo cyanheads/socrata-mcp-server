@@ -1,9 +1,13 @@
 /**
  * @fileoverview Tests for the server-specific environment config — env var
- * mapping and defaults.
+ * mapping, defaults, and a value supplied only through `.env`.
  * @module tests/config/server-config.test
  */
 
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const SERVER_ENV_VARS = [
@@ -80,5 +84,39 @@ describe('getServerConfig', () => {
     });
     expect(config.appToken).toBe('tok-123');
     expect(config.defaultDomain).toBe('data.cityofnewyork.us');
+  });
+});
+
+describe('getServerConfig and a setting supplied only through .env (#61)', () => {
+  const startDir = process.cwd();
+  let envDir: string | undefined;
+
+  afterEach(async () => {
+    vi.doUnmock('@cyanheads/mcp-ts-core/config');
+    process.chdir(startDir);
+    if (envDir) await rm(envDir, { recursive: true, force: true });
+    envDir = undefined;
+  });
+
+  it('reads the value from the working directory .env when process.env lacks it', async () => {
+    envDir = await mkdtemp(join(tmpdir(), 'socrata-env-'));
+    await writeFile(join(envDir, '.env'), 'SOCRATA_DEFAULT_DOMAIN=data.cityofchicago.org\n');
+    vi.stubEnv('SOCRATA_DEFAULT_DOMAIN', undefined);
+    process.chdir(envDir);
+    /**
+     * The framework loads `.env` once per instance of its config module, and
+     * that module is an external dependency, which vi.resetModules() does not
+     * re-evaluate: an earlier case's parse has already spent the load. A fresh
+     * instance, imported under its own URL, starts unloaded, as a server
+     * process does at its first getServerConfig() call.
+     */
+    const frameworkConfigUrl = import.meta.resolve('@cyanheads/mcp-ts-core/config');
+    vi.doMock(
+      '@cyanheads/mcp-ts-core/config',
+      () => import(`${frameworkConfigUrl}?instance=${randomUUID()}`),
+    );
+    vi.resetModules();
+    const { getServerConfig } = await import('@/config/server-config.js');
+    expect(getServerConfig().defaultDomain).toBe('data.cityofchicago.org');
   });
 });
