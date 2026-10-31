@@ -93,6 +93,11 @@ export type QueryResult = {
   rowCount: number;
   /** Portal hostname queried, normalized from the caller's domain. */
   domain: string;
+  /**
+   * Rows the query returns as written (groups, distinct values), from the
+   * best-effort recount run when the page filled the limit or came back empty
+   * past offset 0. Absent when no recount ran or it failed.
+   */
   totalCount?: number;
   assembledQuery: string;
   /**

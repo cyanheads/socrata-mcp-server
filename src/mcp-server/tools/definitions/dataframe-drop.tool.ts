@@ -21,7 +21,7 @@ const DroppedTableSchema = z
 const dataframeDropDefinition = tool('socrata_dataframe_drop', {
   title: 'Drop DataCanvas Data',
   description:
-    "Permanently remove staged DataCanvas data — the whole canvas, or one table on it when table_name is given. Dropping the canvas invalidates its canvas_id: socrata_dataframe_describe and socrata_dataframe_query calls with it then fail as canvas_not_found. Dropping one table leaves the canvas and its other tables in place. Only the server's staged copy is deleted; the portal data is untouched, and socrata_query_dataset can stage it again. Call socrata_dataframe_describe first to see what a canvas holds. Only works when CANVAS_PROVIDER_TYPE=duckdb is set.",
+    "Permanently remove staged DataCanvas data — the whole canvas, or one table on it when table_name is given. Dropping the canvas invalidates its canvas_id: socrata_dataframe_describe and socrata_dataframe_query calls with it then fail as canvas_not_found. Dropping one table leaves the canvas and its other tables in place. Only the server's staged copy is deleted; the portal data is untouched, and socrata_query_dataset can stage it again. Call socrata_dataframe_describe first to see what a canvas holds. Works when the server has a DataCanvas.",
   annotations: {
     readOnlyHint: false,
     destructiveHint: true,

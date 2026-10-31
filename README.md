@@ -66,18 +66,20 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - Per-portal dataset counts fetched live from the Discovery API, cached ~24 hours (`0` means the portal exposes no dataset assets to the catalog; `null` means the count is temporarily unavailable)
 - Client-side substring filtering on domain or organization name; pagination up to 200 per page with offset
 - Returns domain (pass to `socrata_find_datasets`), organization name, and approximate dataset count; the count includes datasets a portal federates from another Socrata tenant (Austin, Illinois, Mesa, and San Francisco publish through a data hub; Seattle catalogs under a sibling tenant)
-- Never fails on an upstream error — a count that cannot be fetched comes back `null` and the listing still returns
+- Never fails on an upstream error — a count that cannot be fetched, or that the call's 50-second deadline cuts off, comes back `null` and the listing still returns
+- Past-the-end notice: an empty page at `offset > 0` names the offset to page below
 
 ---
 
 ### `socrata_find_datasets` <sub>tool</sub>
 
-- Full-text query across dataset names/descriptions; scope with `domain`, filter by `categories`/`tags`, restrict `only` to an asset type (datasets, maps, files, calendars, stories)
-- Sort by relevance, page views, created date, or updated date; up to 100 per page with offset pagination
+- Full-text query across dataset names/descriptions; scope with `domain`, filter by `categories`/`tags` (several values of one filter are ORed), restrict `only` to an asset type (datasets, maps, files, calendars, stories)
+- Sort by relevance, page views, created date, or updated date; `limit` up to 10,000 with `SOCRATA_CLAMP_LIMITS` on, served 100 per call with a notice naming the offset that continues (the schema maximum is 100 with it off)
+- Discovery serves only the first 10,000 matches of a search: `offset` must stay below 10,000, and `totalCount` stops at 10,000 with `totalCountCapped: true` marking that figure a lower bound
 - Returns dataset IDs, names, domains, tags, update timestamps, and `column_names` — the API field names SoQL takes (`cuisine_description`, not the display label `CUISINE DESCRIPTION`), computed-region columns dropped — call `socrata_get_dataset` for typed schema before writing queries
-- Recovery hints on empty results — echoes applied filters and suggests how to broaden
+- Recovery hints on empty results — echoes applied filters and suggests how to broaden; a page past the last match says so and names the offset to page below. The notice also covers a `limit` served below the one requested
 - `domain` takes a bare hostname; URL forms (`https://data.cdc.gov/`) are reduced to the host. A scoped search covers every dataset the portal publishes, including ones federated from another Socrata tenant, reported under the portal's own domain
-- Typed errors: `rate_limited` (retryable) when the Discovery API returns 429, `unknown_domain` when the Discovery catalog does not index the domain, `invalid_domain` when the domain is not a hostname
+- Typed errors: `result_window_exceeded` when `offset` is 10,000 or more, `rate_limited` (retryable) when the Discovery API returns 429, `retry_deadline_exceeded` (retryable) when the call passes its 50-second deadline, `unknown_domain` when the Discovery catalog does not index the domain, `invalid_domain` when the domain is not a hostname
 
 ---
 
@@ -87,7 +89,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - Column `data_type` determines WHERE clause syntax: `Number` → bare literals (`year=2023`), `Text` → single-quoted strings (`year='2023'`)
 - Excludes computed region columns (`:@computed_region_*`) to reduce noise; includes per-column non-null counts when available
 - Dataset IDs are portal-scoped — pass the `domain` from the same `socrata_find_datasets` result; URL-form domains are reduced to the host
-- Typed errors: `invalid_id` (malformed four-by-four ID), `not_found` (no such dataset on the domain queried — the message names the ID and domain, and the recovery names the portal that holds the ID when the Discovery catalog knows it), `unknown_domain` (the domain is not serving the Socrata API — it does not resolve, is not a Socrata portal, or redirects elsewhere; fails on the first attempt), `invalid_domain` (not a hostname), `rate_limited` (retryable; honors the upstream `Retry-After`)
+- Typed errors: `invalid_id` (malformed four-by-four ID), `not_found` (no such dataset on the domain queried — the message names the ID and domain, and the recovery names the portal that holds the ID when the Discovery catalog knows it), `unknown_domain` (the domain is not serving the Socrata API — it does not resolve, is not a Socrata portal, or redirects elsewhere; fails on the first attempt), `invalid_domain` (not a hostname), `rate_limited` (retryable; honors the upstream `Retry-After`), `retry_deadline_exceeded` (retryable; the call passed its 50-second deadline)
 - Always call before writing a `socrata_query_dataset` WHERE clause
 
 ---
@@ -97,10 +99,14 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - `search` for quick full-text lookup (`$q`), or combine `select`/`where`/`group`/`having`/`order` for full analytical control — clauses reference columns by API field name (`field_name` from `socrata_get_dataset`), never the display label; operators `=`, `!=`, `>`, `<`, `LIKE`, `IN(...)`, `BETWEEN`, `IS NULL`, `starts_with()`, `contains()`, `AND`, `OR`, `NOT`
 - Aggregation via `count(*)`, `sum()`, `avg()`, `min()`, `max()` with `group`/`having`
 - `not_tabular` identifies assets without queryable rows; search with `only: "datasets"`. `query_rejected` identifies a gateway refusal of query clauses when a bare row request succeeds; simplify the query and use SoQL `case(condition, value, true, fallback)` for conditional aggregates.
-- Up to 5000 rows per call with offset pagination; `total_count` returned when a plain row query is truncated (absent for grouped/aggregate queries)
+- `limit` up to 50,000 with `SOCRATA_CLAMP_LIMITS` on, but one call returns at most 5,000 rows: a larger `limit` is served as 5,000, with a notice naming the offset that continues when more rows match (off, the schema maximum is 5,000). Page with `offset`
+- `total_count` counts the query as written — groups for a grouped query, distinct values for a distinct select — through a bounded SoQL `$query` pipe recount. It is present when the match holds more rows than the response, and absent when the response holds the whole match or when the recount failed or ran past 15 seconds. `truncated` is set only when `total_count` exceeds `offset + row_count`, or when the page fills `limit` and no count exists
+- An empty page at `offset > 0` gets a past-the-end notice naming the match size, or a may-be-past-the-end notice when the count failed
 - `assembled_query` echoes the SoQL string for learning the syntax; all SODA 2.1 row values are strings except geo/location columns, which return nested objects
-- When `CANVAS_PROVIDER_TYPE=duckdb` and the page fills `limit`, up to 50,000 matching rows spill to a DataCanvas table whatever the `limit` (`canvas_id`, `table_name`, `canvas_row_count`) — list its columns with `socrata_dataframe_describe`, then run SQL with `socrata_dataframe_query`. A small `limit` (e.g. 10) stages a large match without a large inline page
-- Typed errors: `not_tabular`, `query_rejected`, `invalid_id`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`)
+- When the server has a canvas and more rows match past the page, up to 50,000 matching rows spill to a DataCanvas table whatever the `limit` (`canvas_id`, `table_name`, `canvas_row_count`) — list its columns with `socrata_dataframe_describe`, then run SQL with `socrata_dataframe_query`. A small `limit` (e.g. 10) stages a large match without a large inline page. Staging is one SODA request; if it fails or runs out of time the call still returns its inline rows, with no `canvas_id` and a notice saying nothing was staged
+- `table_name` names the staged table (default derived from `dataset_id`, e.g. `ijzp_q8t2_rows`). Spilling under a name the canvas already holds replaces that table, and the notice reports the replacement; pass a distinct `table_name` with the same `canvas_id` to keep several filtered extracts of one dataset side by side. When a named call stages nothing because the whole match fits the page, or the server has no canvas, the notice says so; a `limit` below the page's row count stages a match that fits
+- Every request of a call shares one 50-second deadline, retries and backoffs included
+- Typed errors: `not_tabular`, `query_rejected`, `invalid_id`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`), `retry_deadline_exceeded` (retryable; the call passed its 50-second deadline)
 
 ---
 
@@ -108,7 +114,6 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 - Requires `canvas_id` from a prior `socrata_query_dataset` spill — canvases cannot be enumerated, so omitting it fails with `canvas_id_required` rather than listing tables
 - Shows table name, row count, and DuckDB column types for each registered table (SODA `number` → `DOUBLE`)
-- Only meaningful when `CANVAS_PROVIDER_TYPE=duckdb` is set
 - Typed errors: `canvas_id_required`, `canvas_not_found` (expired or unknown token — re-run `socrata_query_dataset` to stage a fresh canvas)
 
 ---
@@ -117,7 +122,8 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 - SELECT-only SQL against a `canvas_id` table staged by `socrata_query_dataset`; DDL, DML, file references, file-reading functions, and engine-setting functions (`current_schema`, `current_setting`) are rejected. Use direct table references instead of `query_table`; `query()` accepts only a single SQL string literal. Qualify a staged column named `current_schema` with its table (`t.current_schema`).
 - Spilled columns are typed from the SODA response headers: `number` columns (aggregate aliases included) are `DOUBLE`, so numeric comparisons work without a cast (`year > 2020`, `amount < 500`); text and timestamp columns stay `VARCHAR` — compare times with `CAST(date AS TIMESTAMP)`
-- Up to 10,000 rows per call, default 1000
+- `limit` up to 50,000 with `SOCRATA_CLAMP_LIMITS` on (default 1000), but one call returns at most 10,000 rows: a larger `limit` is served as 10,000. When more rows match, the notice gives the paging recipe — `ORDER BY` a unique column with `LIMIT`/`OFFSET` in the SQL. With the switch off, the schema maximum is 10,000
+- `content[]` shows the `**SQL:**` echo as a code span, or as a fenced `sql` block when the SQL spans lines; `structuredContent` carries it unchanged
 - Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE=none`), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, system catalog access, or a denied function)
 - Works out of the box — DuckDB ships as a regular dependency and is enabled by default; `CANVAS_PROVIDER_TYPE=none` disables it
 
@@ -144,7 +150,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 ### `socrata://portals` <sub>resource</sub>
 
 - Curated catalog of 39 known Socrata portals, cursor-paginated (`cursor` param, default 50 per page, capped at 200)
-- Returns domain, organization name, and approximate dataset count (`0` = no dataset assets, `null` = temporarily unavailable), cached ~24 hours
+- Returns domain, organization name, and approximate dataset count (`0` = no dataset assets, `null` = temporarily unavailable, including a count cut off by the 50-second call deadline), cached ~24 hours
 - Pass `domain` to `socrata_find_datasets` to scope a search to one portal
 
 ---
@@ -170,8 +176,8 @@ Agent-friendly output:
 
 - Assembled SoQL string echoed in every `socrata_query_dataset` response so agents can learn and refine syntax
 - Recovery hints on empty results — echoes applied filters with specific suggestions for broadening
-- Truncation disclosure — `truncated`/`shown`/`cap` fields when rows fill the limit, with guidance to page or raise the limit, naming the staged table and both dataframe tools when the result spilled
-- Typed error reasons across every tool (`invalid_id`, `not_found`, `not_tabular`, `query_rejected`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
+- Truncation disclosure — `truncated`/`shown`/`cap` fields when more rows match past the page, with guidance to page or raise the limit, naming the staged table and both dataframe tools when the result spilled
+- Typed error reasons across every tool (`invalid_id`, `not_found`, `not_tabular`, `query_rejected`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `retry_deadline_exceeded`, `result_window_exceeded`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
 
 ## Getting started
 
@@ -215,6 +221,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_SESSION_MODE` | Session handling: `stateful`, `stateless`, or `auto` (schema default `auto` resolves to stateful). This server sets it explicitly to stateless. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424): `debug`, `info`, `notice`, `warning`, `error`. | `info` |
+| `SOCRATA_CLAMP_LIMITS` | Serve a `limit` above a tool's per-call cap at the cap with a notice naming the offset that continues; `false` rejects it and restores each cap as the schema maximum. | `true` |
 | `CANVAS_PROVIDER_TYPE` | DataCanvas spillover for large result sets; `none` disables it. DuckDB ships with the server — no additional install required. | `duckdb` |
 | `SOCRATA_DATAFRAME_DROP_ENABLED` | Set to `true` to enable `socrata_dataframe_drop`. Off, the tool is omitted from the tool list. | `false` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |

@@ -3,9 +3,10 @@
  * @module tests/tools/list-portals.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { listPortals } from '@/mcp-server/tools/definitions/list-portals.tool.js';
+import { contentText } from './content-text.js';
 
 vi.mock('@/services/socrata/socrata-service.js', () => ({
   getSocrataService: vi.fn(),
@@ -73,6 +74,27 @@ describe('listPortals', () => {
     expect(enrichment.totalCount).toBe(0);
     expect(enrichment.notice).toBeDefined();
     expect(enrichment.notice).toContain('xyznotreal');
+  });
+
+  it('names the offset as past the end of the portals on an empty page (#52)', async () => {
+    const result = await runToolContract(listPortals, { offset: 100 });
+
+    const notice = 'The offset 100 is past the end of the 3 portals. Page with an offset below 3.';
+    const sc = result.structuredContent as Record<string, unknown>;
+    expect(sc.portals).toEqual([]);
+    expect(sc.totalCount).toBe(3);
+    expect(sc.notice).toBe(notice);
+    const text = contentText(result);
+    expect(text).toContain(`> ${notice}`);
+    expect(text).not.toContain('No portals available');
+  });
+
+  it('counts only the portals the query matched, in the singular for one (#52)', async () => {
+    const result = await runToolContract(listPortals, { query: 'seattle', offset: 5 });
+
+    expect((result.structuredContent as Record<string, unknown>).notice).toBe(
+      'The offset 5 is past the end of the 1 matching portal. Page with an offset below 1.',
+    );
   });
 
   it('applies pagination via offset and limit', async () => {

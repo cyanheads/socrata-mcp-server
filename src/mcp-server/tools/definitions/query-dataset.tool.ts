@@ -5,6 +5,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import {
+  assertValidIdentifier,
+  CANVAS_IDENTIFIER_REGEX,
   CanvasIdSchema,
   type ColumnSchema,
   inferSchemaFromRows,
@@ -12,6 +14,7 @@ import {
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { codeEcho } from '@/mcp-server/tools/code-echo.js';
 import { escapeTableCell, fencedJson, inlineUpstream } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
@@ -20,12 +23,51 @@ import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 /**
  * Hard cap on rows staged onto a DataCanvas per spill. The inline response stays
- * bounded by the caller's `limit`; this bounds the paginated copy drained across
- * repeated SODA calls, so a match of millions stages a queryable subset rather
+ * bounded by the caller's `limit`; this is the `$limit` of the one SODA request
+ * that stages the copy, so a match of millions stages a queryable subset rather
  * than an unbounded fetch. The canvas is honestly a bounded copy, not "the full
- * result set" when total_count exceeds this cap.
+ * result set" when total_count exceeds this cap. Also the hard ceiling on
+ * `limit` while clamping is on.
  */
 const CANVAS_SPILL_MAX_ROWS = 50_000;
+
+/** Rows one call returns inline, bounding the response size. */
+const QUERY_LIMIT_CAP = 5_000;
+
+/** SOCRATA_CLAMP_LIMITS, read at import: it sets the `limit` maximum the schema advertises. */
+const { clampLimits } = getServerConfig();
+
+/** When a spill fires, as both `limit` describes state it. */
+const LIMIT_SPILL =
+  'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.';
+
+/**
+ * Whether the canvas registers `name` as a table: its identifier check, which
+ * also refuses bare SQL keywords (select, order, …) from a list it does not
+ * export.
+ */
+function canvasAcceptsTableName(name: string): boolean {
+  try {
+    assertValidIdentifier(name, 'table');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The notice sentence for a spill that staged nothing. A staging request the
+ * call's deadline cut off gets the query shapes that stage faster; any other
+ * failure names its class — the `data.reason`, else the error code.
+ */
+function notStagedNotice(err: unknown): string {
+  if (!(err instanceof McpError)) return 'The matching rows were not staged on the canvas.';
+  const reason = err.data?.reason;
+  if (reason === 'retry_deadline_exceeded') {
+    return "The matching rows were not staged on the canvas within the call's 50-second time limit; a narrower where, or no order, stages faster.";
+  }
+  return `The matching rows were not staged on the canvas (${typeof reason === 'string' ? reason : JsonRpcErrorCode[err.code]}).`;
+}
 
 /**
  * Explicit schema for a spilled table. Columns are inferred over every staged
@@ -78,7 +120,7 @@ function soqlRecoveryHint(socrataCode: unknown, column: unknown): string | undef
 export const queryDataset = tool('socrata_query_dataset', {
   title: 'Query Dataset',
   description:
-    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When CANVAS_PROVIDER_TYPE=duckdb and rows fill limit, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.',
+    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When the server has a canvas and more rows match past a full page, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     domain: z
@@ -130,15 +172,38 @@ export const queryDataset = tool('socrata_query_dataset', {
       .number()
       .int()
       .min(1)
-      .max(5000)
+      .max(clampLimits ? CANVAS_SPILL_MAX_ROWS : QUERY_LIMIT_CAP)
       .default(100)
       .describe(
-        'Max rows to return (1–5000). Default 100. Use with offset for pagination. When the canvas is enabled and the page fills limit, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.',
+        clampLimits
+          ? `Max rows to return (1–50,000). One call returns at most 5,000 rows: a larger limit is served as 5,000, with a notice naming the offset that continues when more rows match. Default 100. Use with offset for pagination. ${LIMIT_SPILL}`
+          : `Max rows to return (1–5000). Default 100. Use with offset for pagination. ${LIMIT_SPILL}`,
       ),
     offset: z.number().int().min(0).default(0).describe('Row offset for pagination. Default 0.'),
     canvas_id: CanvasIdSchema.optional().describe(
-      'Optional 10-char DataCanvas token from a prior socrata_query_dataset or socrata_dataframe_describe call. Omit on first call when CANVAS_PROVIDER_TYPE=duckdb to mint a fresh canvas. Large result sets spill here automatically.',
+      'Optional 10-char DataCanvas token from a prior socrata_query_dataset or socrata_dataframe_describe call. Omit on first call to mint a fresh canvas. Large result sets spill here automatically.',
     ),
+    // A blank from a form client reads as unset. The name is lowercased before
+    // the check, so the advertised pattern admits the mixed-case form.
+    table_name: z
+      .preprocess(
+        (value) =>
+          value === '' ? undefined : typeof value === 'string' ? value.toLowerCase() : value,
+        z
+          .string()
+          .regex(
+            CANVAS_IDENTIFIER_REGEX,
+            'table_name takes letters, digits, and underscores, starting with a letter or underscore, 63 characters at most: ^[a-z_][a-z0-9_]{0,62}$ once lowercased.',
+          )
+          .refine((name) => !CANVAS_IDENTIFIER_REGEX.test(name) || canvasAcceptsTableName(name), {
+            error: (issue) =>
+              `table_name "${String(issue.input)}" is a SQL keyword, which the canvas refuses as a table name. Choose another name, such as one for the extract (crimes_2025).`,
+          })
+          .optional(),
+      )
+      .describe(
+        'Name for the canvas table a spill stages: letters, digits, and underscores, starting with a letter or underscore, 63 characters at most; lowercased, and not a SQL keyword such as select or order. Defaults to a name derived from dataset_id (ijzp_q8t2_rows). A spill under a name the canvas already holds replaces that table, so give each extract its own name, with the same canvas_id, to keep several on one canvas.',
+      ),
   }),
   output: z.object({
     rows: z
@@ -151,7 +216,7 @@ export const queryDataset = tool('socrata_query_dataset', {
       .number()
       .optional()
       .describe(
-        'Total matching source rows when a plain row query is truncated (row_count < total_count). Absent when the full result fits and for grouped/aggregate queries (group set), where a source-row count would not describe the returned groups.',
+        'Rows the query matches, in the same unit as rows: groups for a grouped query, distinct values for a distinct select. Counted when rows fill limit or a page past offset 0 comes back empty; present when the match holds more rows than this response. Absent otherwise, and when the count failed or ran past its 15-second bound.',
       ),
     assembled_query: z
       .string()
@@ -162,7 +227,7 @@ export const queryDataset = tool('socrata_query_dataset', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token when results spilled (requires CANVAS_PROVIDER_TYPE=duckdb). Pass to socrata_dataframe_query to run SQL over the staged rows in table_name — a bounded copy of the matching set (up to 50,000 rows, reported in canvas_row_count), not the full set when total_count exceeds that cap. Page with offset to reach rows beyond it.',
+        'DataCanvas token when results spilled. Pass to socrata_dataframe_query to run SQL over the staged rows in table_name — a bounded copy of the matching set (up to 50,000 rows, reported in canvas_row_count), not the full set when total_count exceeds that cap. Page with offset to reach rows beyond it.',
       ),
     canvas_row_count: z
       .number()
@@ -185,13 +250,13 @@ export const queryDataset = tool('socrata_query_dataset', {
       .string()
       .optional()
       .describe(
-        'Guidance when the query returned zero rows (review the SoQL or broaden the filter), or when rows filled the limit (how to page, and the staged table to query when the result spilled). Absent otherwise.',
+        'Guidance when the query returned zero rows (review the SoQL or broaden the filter; past offset 0, whether the offset passed the end of the match), or when more rows match past this page: how to page, naming the requested and served limit when a limit above the 5,000-row per-call cap was served as 5,000; the staged table to query when the result spilled, and the earlier table of that name it replaced; or why nothing was staged. Absent otherwise.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when rows filled the limit — more rows may match (see total_count when present). Spills to canvas when enabled; table_name names the staged table.',
+        'True when more rows match past this page: total_count exceeds offset + row_count, or rows filled the limit and no count was made. Spills to canvas when enabled; table_name names the staged table.',
       ),
     shown: z.number().optional().describe('Rows returned in this response when capped.'),
     cap: z.number().optional().describe('The row limit that was applied when capped.'),
@@ -254,6 +319,15 @@ export const queryDataset = tool('socrata_query_dataset', {
       retryable: true,
       recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
     },
+    {
+      reason: 'retry_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'The portal did not answer the query within the 50-second time limit the call shares across its requests, retries included.',
+      retryable: true,
+      thrownBy: 'service',
+      recovery:
+        'Make the query cheaper, then retry: a narrower where, a smaller limit, or no order (sorting a large dataset is slow).',
+    },
   ],
 
   async handler(input, ctx) {
@@ -266,10 +340,13 @@ export const queryDataset = tool('socrata_query_dataset', {
       );
     }
 
+    // Served limit: a limit between the cap and the ceiling is served at the cap.
+    const limit = Math.min(input.limit, QUERY_LIMIT_CAP);
     ctx.log.info('Querying dataset', {
       domain,
       datasetId: input.dataset_id,
-      limit: input.limit,
+      limit,
+      requestedLimit: input.limit,
     });
 
     const svc = getSocrataService();
@@ -291,7 +368,7 @@ export const queryDataset = tool('socrata_query_dataset', {
           ...(group ? { group } : {}),
           ...(having ? { having } : {}),
           ...(order ? { order } : {}),
-          limit: input.limit,
+          limit,
           offset: input.offset,
         },
         ctx,
@@ -331,29 +408,53 @@ export const queryDataset = tool('socrata_query_dataset', {
       throw err;
     }
 
-    if (qResult.rowCount === 0) {
-      ctx.enrich.notice(
-        `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${escapeMarkdownInline(where)}` : ''}. Check field names and quoting with socrata_get_dataset, or broaden the filter.`,
-      );
+    // The recount (present when it ran and succeeded) settles what the page
+    // cannot: whether rows remain past it, and whether an empty page overshot
+    // the match. total_count is reported when the match holds more rows than
+    // this response.
+    const { rowCount, totalCount } = qResult;
+    const total = totalCount != null && totalCount > rowCount ? totalCount : undefined;
+    // More rows match past this page: the count says so, or the page filled the served limit and no count was made.
+    const truncated =
+      rowCount >= limit && (totalCount == null || totalCount > input.offset + rowCount);
+
+    if (rowCount === 0) {
+      if (input.offset > 0 && total != null) {
+        ctx.enrich.notice(
+          `The offset ${input.offset} is past the end of the ${total} matching ${total === 1 ? 'row' : 'rows'}. Page with an offset below ${total}.`,
+        );
+      } else if (input.offset > 0 && totalCount == null) {
+        ctx.enrich.notice(
+          `No rows returned at offset ${input.offset}; the offset may be past the end of the matching rows, which could not be counted. Rerun with offset 0 to tell that apart from a filter that matches nothing.`,
+        );
+      } else {
+        ctx.enrich.notice(
+          `No rows returned for dataset "${input.dataset_id}"${where ? ` with WHERE ${escapeMarkdownInline(where)}` : ''}. Check field names and quoting with socrata_get_dataset, or broaden the filter.`,
+        );
+      }
     }
 
-    // Attempt DataCanvas spillover when canvas is available and result hit the limit.
-    const filled = qResult.rowCount >= input.limit;
-    let spill: { canvasId: string; rowCount: number; tableName: string } | undefined;
+    // Stage the match on the DataCanvas when one is available and rows remain past this page.
+    let spill:
+      | { canvasId: string; rowCount: number; tableName: string; replacedRowCount?: number }
+      | undefined;
+    // Why nothing was staged: a spill that failed, or a caller-named table the call made none of.
+    let notStaged: string | undefined;
     const canvas = getCanvas();
-    if (canvas && filled) {
+    if (canvas && truncated) {
       try {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        const tableName = `${/^[0-9]/.test(input.dataset_id) ? 't_' : ''}${input.dataset_id.replaceAll('-', '_')}_rows`;
-        // Stage the wider matching set, not just this page: drain paginated SODA
-        // calls up to the safety cap. The inline `rows` above stay bounded by
-        // input.limit; only this spilled copy holds the wider set the canvas
-        // advertises. Socrata system columns (`:@computed_region_*` and other
-        // `:`-prefixed keys) are not valid canvas identifiers and would fail
-        // registerTable — strip them from the spilled projection; the inline
-        // `rows` keep every column.
-        const canvasRows: Record<string, unknown>[] = [];
-        for await (const row of svc.streamDatasetRows(
+        const tableName =
+          input.table_name ??
+          `${/^[0-9]/.test(input.dataset_id) ? 't_' : ''}${input.dataset_id.replaceAll('-', '_')}_rows`;
+        // Stage the wider matching set, not just this page: one SODA request
+        // up to the safety cap, bounded by what is left of the call's
+        // deadline. The inline `rows` above stay bounded by the served limit; only
+        // this copy holds the wider set the canvas advertises. Socrata system
+        // columns (`:@computed_region_*` and other `:`-prefixed keys) are not
+        // valid canvas identifiers and would fail registerTable — strip them
+        // from the staged projection; the inline `rows` keep every column.
+        const staged = await svc.fetchStagingRows(
           {
             domain: qResult.domain,
             datasetId: input.dataset_id,
@@ -367,19 +468,21 @@ export const queryDataset = tool('socrata_query_dataset', {
           },
           CANVAS_SPILL_MAX_ROWS,
           ctx,
-        )) {
-          canvasRows.push(
-            Object.keys(row).some((k) => k.startsWith(':'))
-              ? Object.fromEntries(Object.entries(row).filter(([k]) => !k.startsWith(':')))
-              : row,
-          );
-        }
+        );
+        const canvasRows = staged.map((row) =>
+          Object.keys(row).some((k) => k.startsWith(':'))
+            ? Object.fromEntries(Object.entries(row).filter(([k]) => !k.startsWith(':')))
+            : row,
+        );
         if (!qResult.fieldTypes) {
           ctx.log.warning(
             'SODA X-SODA2-Fields/X-SODA2-Types headers missing or malformed — spilled table uses inferred column types',
             { datasetId: input.dataset_id, tableName },
           );
         }
+        // The table this spill replaces: one the canvas already holds under
+        // the name. A canvas this call minted holds none.
+        const [replaced] = instance.isNew ? [] : await instance.describe({ tableName });
         const registered = await instance.registerTable(tableName, canvasRows, {
           schema: spillSchema(canvasRows, qResult.fieldTypes),
         });
@@ -387,32 +490,58 @@ export const queryDataset = tool('socrata_query_dataset', {
           canvasId: instance.canvasId,
           rowCount: registered.rowCount,
           tableName: registered.tableName,
+          ...(replaced ? { replacedRowCount: replaced.rowCount } : {}),
         };
         ctx.log.info('Spilled query result to DataCanvas', spill);
       } catch (err) {
-        // Canvas is best-effort — log but don't fail the query.
+        // Staging is best-effort: the inline page stands and the notice says
+        // why nothing was staged. A cancelled call stays cancelled.
+        ctx.signal.throwIfAborted();
+        notStaged = notStagedNotice(err);
         ctx.log.warning('DataCanvas spillover failed', { error: String(err) });
       }
+    } else if (input.table_name && rowCount > 0) {
+      // A smaller limit makes the page stop short of the match, which stages it.
+      notStaged = canvas
+        ? `Nothing was staged as table "${input.table_name}": no rows match past this page, and only a match that runs past the page is staged.${rowCount > 1 ? ` Rerun with a limit below ${rowCount} to stage these rows.` : ''}`
+        : `Nothing was staged as table "${input.table_name}": this server has no DataCanvas.`;
     }
 
-    if (filled) {
+    if (truncated) {
       // One call: truncated() writes `notice`, which is last-wins. Only claim an
-      // exact count when the recount produced one — total_count is absent for
-      // grouped queries and when the recount failed.
-      const more = `Rows filled the limit — more rows may match${qResult.totalCount != null ? ' (exact count in total_count)' : ''}.`;
+      // exact count when the recount produced one — total_count is absent when
+      // the recount failed or timed out. A limit served below the one asked
+      // names both and the offset that continues; raising limit helps only
+      // below the cap.
+      const exact = total != null ? ' (exact count in total_count)' : '';
+      const clamped = limit < input.limit;
+      const more = clamped
+        ? `The requested limit ${input.limit} was served as ${limit}: the per-call cap is ${QUERY_LIMIT_CAP}, and more rows may match${exact}. Continue with offset ${input.offset + rowCount}.`
+        : `Rows filled the limit — more rows may match${exact}.`;
+      const paging = clamped
+        ? ''
+        : limit < QUERY_LIMIT_CAP
+          ? ` Page with offset or raise limit (max ${QUERY_LIMIT_CAP}).`
+          : ' Page with offset.';
+      const replaced =
+        spill?.replacedRowCount != null
+          ? ` Replaced table "${spill.tableName}" (previously ${spill.replacedRowCount.toLocaleString()} rows).`
+          : '';
       ctx.enrich.truncated({
-        shown: qResult.rowCount,
-        cap: input.limit,
+        shown: rowCount,
+        cap: limit,
         guidance: spill
-          ? `${more} Staged ${spill.rowCount.toLocaleString()} rows as table "${spill.tableName}" on canvas ${spill.canvasId}: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. The staged copy stops at ${CANVAS_SPILL_MAX_ROWS.toLocaleString()} rows; page with offset for rows beyond it.`
-          : `${more} Page with offset or raise limit (max 5000).`,
+          ? `${more} Staged ${spill.rowCount.toLocaleString()} rows as table "${spill.tableName}" on canvas ${spill.canvasId}: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.${replaced} The staged copy stops at ${CANVAS_SPILL_MAX_ROWS.toLocaleString()} rows; page with offset for rows beyond it.`
+          : `${more}${notStaged ? ` ${notStaged}` : ''}${paging}`,
       });
+    } else if (notStaged) {
+      ctx.enrich.notice(notStaged);
     }
 
     return {
       rows: qResult.rows,
-      row_count: qResult.rowCount,
-      ...(qResult.totalCount != null ? { total_count: qResult.totalCount } : {}),
+      row_count: rowCount,
+      ...(total != null ? { total_count: total } : {}),
       assembled_query: qResult.assembledQuery,
       domain: qResult.domain,
       dataset_id: input.dataset_id,
@@ -434,7 +563,8 @@ export const queryDataset = tool('socrata_query_dataset', {
         `_Total matching rows: ${result.total_count.toLocaleString()} — paginate with offset or narrow the query._`,
       );
     }
-    lines.push(`**Query:** ${result.assembled_query}`);
+    // Caller clauses (a where value like '*none*') read back verbatim.
+    lines.push(...codeEcho('Query', result.assembled_query));
     if (result.canvas_id) {
       const staged =
         result.canvas_row_count != null
@@ -453,9 +583,11 @@ export const queryDataset = tool('socrata_query_dataset', {
 
     lines.push('');
 
-    // Render as markdown table if columns are consistent and not too wide.
-    const firstRow = result.rows[0];
-    const cols = Object.keys(firstRow ?? {});
+    // Columns are every key any row carries, in first-appearance order: SODA
+    // omits a null-valued key from its row, so the first row alone would drop
+    // a column that is null there. A row without a key gets an empty cell.
+    // Render as a markdown table when that union is not too wide.
+    const cols = [...new Set(result.rows.flatMap((row) => Object.keys(row)))];
 
     // Render every row structuredContent carries — result.rows is already bounded
     // by the caller's `limit`, so a second render-only cap here would silently

@@ -115,6 +115,15 @@ export const getDataset = tool('socrata_get_dataset', {
       retryable: true,
       recovery: 'Retry after a short delay. Set SOCRATA_APP_TOKEN for higher per-IP rate limits.',
     },
+    {
+      reason: 'retry_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'The portal did not answer within the 50-second time limit the call shares across its requests, retries included.',
+      retryable: true,
+      thrownBy: 'service',
+      recovery:
+        'Retry the same call shortly; metadata requests are usually fast, so a repeated timeout points to a degraded portal.',
+    },
   ],
 
   async handler(input, ctx) {

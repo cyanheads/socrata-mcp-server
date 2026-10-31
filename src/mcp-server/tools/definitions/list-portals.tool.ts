@@ -57,8 +57,14 @@ export const listPortals = tool('socrata_list_portals', {
     notice: z
       .string()
       .optional()
-      .describe('Recovery hint when no portals matched the filter. Absent on non-empty pages.'),
+      .describe(
+        'Recovery hint for an empty page: no portals matched the filter, or offset passed the last portal (names the offset to page below). Absent on non-empty pages.',
+      ),
   },
+
+  // No errors contract: a count lookup that fails, or that the call's deadline
+  // cuts off, degrades that portal to a null count; the curated catalog is
+  // always returned.
 
   async handler(input, ctx) {
     ctx.log.info('Listing portals', { query: input.query, limit: input.limit });
@@ -82,11 +88,17 @@ export const listPortals = tool('socrata_list_portals', {
     ctx.enrich.total(totalCount);
 
     if (page.length === 0) {
-      ctx.enrich.notice(
-        queryFilter
-          ? `No portals matched "${escapeMarkdownInline(input.query ?? '')}". Try a broader term or omit the query to list all portals.`
-          : 'No portals available.',
-      );
+      if (totalCount > 0) {
+        ctx.enrich.notice(
+          `The offset ${input.offset} is past the end of the ${totalCount} ${queryFilter ? 'matching ' : ''}${totalCount === 1 ? 'portal' : 'portals'}. Page with an offset below ${totalCount}.`,
+        );
+      } else {
+        ctx.enrich.notice(
+          queryFilter
+            ? `No portals matched "${escapeMarkdownInline(input.query ?? '')}". Try a broader term or omit the query to list all portals.`
+            : 'No portals available.',
+        );
+      }
       return { portals: [] };
     }
 

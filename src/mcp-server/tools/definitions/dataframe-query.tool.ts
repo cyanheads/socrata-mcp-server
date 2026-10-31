@@ -7,8 +7,51 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema, type DataCanvas, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
+import { codeEcho } from '@/mcp-server/tools/code-echo.js';
 import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
+
+/**
+ * Rows one call returns, bounding the response size. Also the DataCanvas
+ * default row limit (CANVAS_DEFAULT_ROW_LIMIT), above which the provider
+ * rejects a query's rowLimit outright.
+ */
+const QUERY_LIMIT_CAP = 10_000;
+
+/**
+ * Hard ceiling on `limit` while clamping is on — the most rows
+ * socrata_query_dataset stages into one table.
+ */
+const QUERY_LIMIT_CEILING = 50_000;
+
+/** SOCRATA_CLAMP_LIMITS, read at import: it sets the `limit` maximum the schema advertises. */
+const { clampLimits } = getServerConfig();
+
+/**
+ * How to read past a page held to the per-call cap. The tool takes no offset,
+ * so paging happens in the SQL. Only a stable order pages soundly: a page of
+ * SQL without one does not line up with an ordered OFFSET page, which would
+ * skip some rows and repeat others, so such SQL restarts at OFFSET 0. The
+ * page LIMIT replaces any LIMIT the SQL carried, so that one becomes the
+ * walk's end bound.
+ */
+const PAGING_GUIDANCE = `To read every row exactly once, page in the SQL: ORDER BY a unique column (ORDER BY ALL when none is unique), LIMIT ${QUERY_LIMIT_CAP}, and OFFSET raised by ${QUERY_LIMIT_CAP} per call. If this SQL already orders that way, these rows are one such page: continue at OFFSET ${QUERY_LIMIT_CAP}, or ${QUERY_LIMIT_CAP} past the OFFSET it already has. If it does not, start over at OFFSET 0: rows served in any other order do not line up with ordered pages. When the SQL has its own LIMIT, stop once the pages have read that many rows. Or narrow the result with WHERE or aggregates.`;
+
+/**
+ * The notice for a page held to `served` rows while more match. Raising
+ * `limit` helps only below the cap; at the cap, and for a limit served at it,
+ * the way on is paging.
+ */
+function truncationNotice(requested: number, served: number): string {
+  if (served < requested) {
+    return `The requested limit ${requested} was served as ${served}: the per-call cap is ${served}, and more rows match. ${PAGING_GUIDANCE}`;
+  }
+  if (served === QUERY_LIMIT_CAP) {
+    return `Results were capped at the ${QUERY_LIMIT_CAP}-row per-call cap — more rows match. ${PAGING_GUIDANCE}`;
+  }
+  return `Results were capped at the limit — more rows match. Raise limit (max ${QUERY_LIMIT_CAP}), or refine the SQL with WHERE/aggregates to narrow the result set.`;
+}
 
 /**
  * DuckDB read-only SQL-gate rejection reasons that map to this tool's declared
@@ -32,7 +75,7 @@ const SQL_GATE_REJECTION_REASONS: ReadonlySet<string> = new Set([
 export const dataframeQuery = tool('socrata_dataframe_query', {
   title: 'Query DataCanvas Table',
   description:
-    'Run SELECT-only SQL against a DataCanvas table populated by socrata_query_dataset. Columns SODA types as number (including aggregate aliases like count(*) as n) are staged as DOUBLE, so numeric comparisons work without a cast (year > 2020, amount < 500). Text and timestamp columns stay VARCHAR — compare times with CAST(date AS TIMESTAMP). Only works when CANVAS_PROVIDER_TYPE=duckdb is set. Use socrata_dataframe_describe to see registered tables and their schemas.',
+    'Run SELECT-only SQL against a DataCanvas table populated by socrata_query_dataset. Columns SODA types as number (including aggregate aliases like count(*) as n) are staged as DOUBLE, so numeric comparisons work without a cast (year > 2020, amount < 500). Text and timestamp columns stay VARCHAR — compare times with CAST(date AS TIMESTAMP). Works when the server has a DataCanvas. Use socrata_dataframe_describe to see registered tables and their schemas.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
@@ -47,9 +90,13 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       .number()
       .int()
       .min(1)
-      .max(10000)
+      .max(clampLimits ? QUERY_LIMIT_CEILING : QUERY_LIMIT_CAP)
       .default(1000)
-      .describe('Max rows to return (1–10000). Default 1000.'),
+      .describe(
+        clampLimits
+          ? 'Max rows to return (1–50,000). One call returns at most 10,000 rows: a larger limit is served as 10,000, with a notice naming how to page through the rest when more rows match. Default 1000.'
+          : 'Max rows to return (1–10000). Default 1000.',
+      ),
   }),
   output: z.object({
     rows: z
@@ -68,7 +115,9 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when the SQL returned zero rows. Absent when rows are present.'),
+      .describe(
+        'Guidance for this page: how to adjust the SQL when it returned zero rows, or how to reach the rest when rows were capped, naming the requested and served limit when a limit above the 10,000-row per-call cap was served as 10,000. Absent otherwise.',
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -131,10 +180,12 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       }
       throw err;
     }
+    // Served limit: a limit between the cap and the ceiling is served at the cap.
+    const limit = Math.min(input.limit, QUERY_LIMIT_CAP);
     let result: Awaited<ReturnType<typeof instance.query>>;
     try {
       result = await instance.query(input.sql, {
-        rowLimit: input.limit,
+        rowLimit: limit,
         denySystemCatalogs: true,
         signal: ctx.signal,
       });
@@ -168,9 +219,8 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     } else if (result.truncated) {
       ctx.enrich.truncated({
         shown: result.rows.length,
-        cap: input.limit,
-        guidance:
-          'Results were capped at the limit — more rows match. Raise limit (max 10000), or refine the SQL with WHERE/aggregates to narrow the result set.',
+        cap: limit,
+        guidance: truncationNotice(input.limit, limit),
       });
     }
 
@@ -185,7 +235,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(`**${result.row_count} rows** from canvas \`${result.canvas_id}\``);
-    lines.push(`**SQL:** \`${result.sql}\``);
+    lines.push(...codeEcho('SQL', result.sql, 'sql'));
 
     if (result.rows.length === 0) {
       lines.push('\n_No rows returned._');

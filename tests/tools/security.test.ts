@@ -17,9 +17,12 @@ vi.mock('@/services/socrata/socrata-service.js', () => ({
 }));
 
 vi.mock('@/config/server-config.js', () => ({
-  getServerConfig: vi.fn().mockReturnValue({ defaultDomain: 'data.seattle.gov' }),
+  getServerConfig: vi
+    .fn()
+    .mockReturnValue({ defaultDomain: 'data.seattle.gov', clampLimits: true }),
 }));
 
+import { getServerConfig } from '@/config/server-config.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const mockFindDatasets = vi.fn();
@@ -38,6 +41,29 @@ beforeEach(() => {
   (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(mockService);
 });
 
+/**
+ * A fresh copy of the find-datasets tool built with SOCRATA_CLAMP_LIMITS =
+ * `clampLimits`: the switch is read once, at import, to set the `limit` maximum.
+ */
+async function loadFindDatasets(clampLimits: boolean) {
+  (getServerConfig as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+    defaultDomain: 'data.seattle.gov',
+    clampLimits,
+  });
+  vi.resetModules();
+  return (await import('@/mcp-server/tools/definitions/find-datasets.tool.js')).findDatasets;
+}
+
+/** A fresh copy of the query-dataset tool built with SOCRATA_CLAMP_LIMITS = `clampLimits`. */
+async function loadQueryDataset(clampLimits: boolean) {
+  (getServerConfig as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+    defaultDomain: 'data.seattle.gov',
+    clampLimits,
+  });
+  vi.resetModules();
+  return (await import('@/mcp-server/tools/definitions/query-dataset.tool.js')).queryDataset;
+}
+
 /** The error envelope a contract run returns — carries the framework's declared-hint fill. */
 function errorOf(result: Awaited<ReturnType<typeof runToolContract>>) {
   expect(result.isError).toBe(true);
@@ -54,13 +80,48 @@ describe('input validation — schema boundaries', () => {
     expect(() => findDatasets.input.parse({ limit: 0 })).toThrow();
   });
 
-  it('rejects findDatasets limit above maximum (101)', () => {
-    expect(() => findDatasets.input.parse({ limit: 101 })).toThrow();
+  it('serves an over-cap findDatasets limit (101) at the 100-result cap with a notice', async () => {
+    mockFindDatasets.mockResolvedValue({
+      results: Array.from({ length: 100 }, (_, i) => ({
+        datasetId: `abcd-${String(i).padStart(4, '0')}`,
+        domain: 'data.seattle.gov',
+        name: `Dataset ${i}`,
+        tags: [],
+        columnNames: [],
+      })),
+      totalCount: 500,
+    });
+
+    const result = await runToolContract(findDatasets, { limit: 101 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockFindDatasets).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 100 }),
+      expect.anything(),
+    );
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'The requested limit 101 was served as 100: the per-call cap is 100. Continue with offset 100.',
+    );
   });
 
-  it('accepts findDatasets at limit boundaries (1 and 100)', () => {
+  it('rejects findDatasets limit 101 when SOCRATA_CLAMP_LIMITS is off', async () => {
+    const clampOff = await loadFindDatasets(false);
+    expect(() => clampOff.input.parse({ limit: 101 })).toThrow();
+    expect(clampOff.input.parse({ limit: 100 }).limit).toBe(100);
+  });
+
+  it.each([true, false])(
+    'rejects findDatasets limit above the 10,000 ceiling (10001) with clamping %s',
+    async (clampLimits) => {
+      const def = await loadFindDatasets(clampLimits);
+      expect(() => def.input.parse({ limit: 10_001 })).toThrow();
+    },
+  );
+
+  it('accepts findDatasets at limit boundaries (1, 100, and 10,000 with clamping on)', () => {
     expect(() => findDatasets.input.parse({ limit: 1 })).not.toThrow();
     expect(() => findDatasets.input.parse({ limit: 100 })).not.toThrow();
+    expect(() => findDatasets.input.parse({ limit: 10_000 })).not.toThrow();
   });
 
   it('rejects findDatasets negative offset', () => {
@@ -71,9 +132,40 @@ describe('input validation — schema boundaries', () => {
     expect(() => findDatasets.input.parse({ offset: 0 })).not.toThrow();
   });
 
-  it('rejects queryDataset limit above maximum (5001)', () => {
-    expect(() => queryDataset.input.parse({ dataset_id: 'abcd-1234', limit: 5001 })).toThrow();
+  it('serves an over-cap queryDataset limit (5001) at the 5,000-row cap with a notice', async () => {
+    mockQueryDataset.mockResolvedValue({
+      rows: Array.from({ length: 5000 }, (_, i) => ({ id: String(i) })),
+      rowCount: 5000,
+      domain: 'data.seattle.gov',
+      totalCount: 9000,
+      assembledQuery: '$limit=5000',
+    });
+
+    const result = await runToolContract(queryDataset, { dataset_id: 'abcd-1234', limit: 5001 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockQueryDataset).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 5000 }),
+      expect.anything(),
+    );
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'The requested limit 5001 was served as 5000: the per-call cap is 5000, and more rows may match (exact count in total_count). Continue with offset 5000.',
+    );
   });
+
+  it('rejects queryDataset limit 5001 when SOCRATA_CLAMP_LIMITS is off', async () => {
+    const clampOff = await loadQueryDataset(false);
+    expect(() => clampOff.input.parse({ dataset_id: 'abcd-1234', limit: 5001 })).toThrow();
+    expect(clampOff.input.parse({ dataset_id: 'abcd-1234', limit: 5000 }).limit).toBe(5000);
+  });
+
+  it.each([true, false])(
+    'rejects queryDataset limit above the 50,000 ceiling (50001) with clamping %s',
+    async (clampLimits) => {
+      const def = await loadQueryDataset(clampLimits);
+      expect(() => def.input.parse({ dataset_id: 'abcd-1234', limit: 50_001 })).toThrow();
+    },
+  );
 
   it('accepts queryDataset at limit boundary (5000)', () => {
     expect(() => queryDataset.input.parse({ dataset_id: 'abcd-1234', limit: 5000 })).not.toThrow();

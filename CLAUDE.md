@@ -134,7 +134,7 @@ export const exploreOpenData = prompt('explore_open_data', {
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
 import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { parseConfig, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   appToken: z.string().optional().describe('Socrata app token for higher rate limits.'),
@@ -143,15 +143,19 @@ const ServerConfigSchema = z.object({
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
-    appToken: 'SOCRATA_APP_TOKEN',
-    defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
-  });
+  if (!_config) {
+    // Tool modules read this at import; under Node only parseConfig() loads `.env`.
+    parseConfig();
+    _config = parseEnvConfig(ServerConfigSchema, {
+      appToken: 'SOCRATA_APP_TOKEN',
+      defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
+    });
+  }
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which `createApp()` prints as a clean startup banner when thrown during its setup; a read at module import, as the tool modules here make, exits with a stack trace instead (#62).
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -259,7 +263,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                              # createApp() entry point — registers all tools, resources, prompts
   config/
-    server-config.ts                    # SOCRATA_APP_TOKEN, SOCRATA_DEFAULT_DOMAIN, SOCRATA_DATAFRAME_DROP_ENABLED (Zod schema)
+    server-config.ts                    # SOCRATA_APP_TOKEN, SOCRATA_DEFAULT_DOMAIN, SOCRATA_DATAFRAME_DROP_ENABLED, SOCRATA_CLAMP_LIMITS (Zod schema; loads `.env` via `parseConfig()` before its first parse)
   services/
     canvas-accessor.ts                  # Module-level DataCanvas accessor, wired in setup()
     socrata/

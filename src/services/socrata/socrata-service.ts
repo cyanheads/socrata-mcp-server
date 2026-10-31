@@ -9,6 +9,7 @@ import {
   McpError,
   notFound,
   serviceUnavailable,
+  timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -26,6 +27,15 @@ import type {
 } from './types.js';
 import { DATASET_ID_PATTERN } from './types.js';
 
+/**
+ * Wall-clock budget every upstream request of one tool call or resource read
+ * shares: each request's retries and backoffs, the side lookups, the recount,
+ * and the canvas staging copy. It ends before the 60 s request timeout MCP SDK
+ * clients apply by default, so a slow portal reaches the caller as a typed
+ * `retry_deadline_exceeded` rather than a client-side timeout.
+ */
+const CALL_DEADLINE_MS = 50_000;
+
 /** Discovery API base URL (cross-portal). */
 const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
 
@@ -36,11 +46,21 @@ const DISCOVERY_HOST = new URL(DISCOVERY_BASE).host;
  * Budget for the best-effort Discovery `?ids=` lookup on a dataset not_found.
  * One attempt, outside `withRetry` — the lookup only runs on a request that has
  * already failed (live: 0.33–0.51 s per call), so it must never add seconds.
+ * The call's deadline caps it further.
  */
 const DISCOVERY_LOOKUP_TIMEOUT_MS = 2_500;
 
-/** One bare-row diagnostic on an already-failed query, without retries. */
+/** One bare-row diagnostic on an already-failed query, without retries; the call's deadline caps it further. */
 const QUERY_DIAGNOSTIC_TIMEOUT_MS = 2_500;
+
+/**
+ * Budget for the best-effort recount of a query's matching rows: one attempt,
+ * no retries, capped further by the call's deadline. A distinct or grouped
+ * recount scans every match while the limited query it counts can stop early
+ * (live: Chicago's 34-group recount took 8.4 s), so the page never waits on it
+ * past this.
+ */
+const RECOUNT_TIMEOUT_MS = 15_000;
 
 /** A lowercase DNS hostname with at least one dot and an alphabetic (or punycode) TLD. */
 const HOSTNAME_PATTERN =
@@ -51,9 +71,6 @@ const SODA_POSITION_ECHO = /;\s*position: Map\([\s\S]*$/;
 
 /** Prefix of Socrata's system computed-region columns — geospatial join artifacts. */
 const COMPUTED_REGION_PREFIX = ':@computed_region_';
-
-/** SODA `$limit` ceiling per request — the paginated canvas drain fetches pages this size. */
-const SODA_PAGE_MAX = 5000;
 
 /**
  * Curated list of well-known Socrata portals.
@@ -315,6 +332,24 @@ async function classifiedHttpError(
   return new McpError(base.code, message, base.data);
 }
 
+/**
+ * The failure of a request the call's deadline cut off: the `Timeout` and
+ * `retry_deadline_exceeded` reason `withRetry` raises, restated against the
+ * call's whole budget rather than what was left of it when the request began.
+ */
+function callDeadlineExceeded(host: string, cause?: unknown): McpError {
+  return timeout(
+    `The request to ${host} did not complete within this call's ${CALL_DEADLINE_MS / 1000}-second time limit.`,
+    { reason: 'retry_deadline_exceeded', host, deadlineMs: CALL_DEADLINE_MS, retryable: true },
+    { cause },
+  );
+}
+
+/** True for the error a request cut off by the call's deadline fails with. */
+function isDeadlineExpiry(err: unknown): boolean {
+  return err instanceof McpError && err.data?.reason === 'retry_deadline_exceeded';
+}
+
 /** How long a successful portal-count refresh stays fresh. */
 const PORTAL_COUNT_TTL_MS = 24 * 60 * 60 * 1000;
 /** Retry sooner when a refresh produced no counts at all (upstream outage). */
@@ -400,6 +435,27 @@ export class SocrataService {
    */
   private appTokenDisabled = false;
 
+  /**
+   * When each call's deadline ({@link CALL_DEADLINE_MS}) runs out, keyed by its
+   * context. Every tool call and resource read has its own `Context`, so the
+   * first upstream request a call makes starts its clock and every later one
+   * — any service method, the recount, the staging copy — shares it.
+   */
+  private readonly callDeadlines = new WeakMap<Context, number>();
+
+  /**
+   * Milliseconds left on the call's deadline, never negative. A best-effort
+   * side request bounds itself by `Math.min(its own cap, remainingMs(ctx))`.
+   */
+  private remainingMs(ctx: Context): number {
+    let expiresAt = this.callDeadlines.get(ctx);
+    if (expiresAt === undefined) {
+      expiresAt = Date.now() + CALL_DEADLINE_MS;
+      this.callDeadlines.set(ctx, expiresAt);
+    }
+    return Math.max(0, expiresAt - Date.now());
+  }
+
   /** Build the default request headers, adding the app token unless it's disabled. */
   private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
@@ -430,200 +486,236 @@ export class SocrataService {
   /**
    * {@link fetchJson}, also returning the successful response's headers — the
    * `/resource` endpoint carries each returned field's SODA type in them.
+   * Every attempt and backoff runs inside the call's deadline
+   * ({@link remainingMs}), and nothing is sent once it has passed. Its expiry
+   * fails as `retry_deadline_exceeded`, unless the last attempt that got an
+   * answer was a 429: then the `rate_limited` failure names the cause.
+   * `capMs` makes it a best-effort side request: one attempt, no retries,
+   * bounded by `min(capMs, remaining)`; when the cap is the tighter bound, its
+   * expiry fails with `withRetry`'s own error naming that bound.
    */
-  private fetchJsonResponse<T>(
+  private async fetchJsonResponse<T>(
     url: string,
     ctx: Context,
     expected?: ExpectedBody,
+    capMs?: number,
   ): Promise<{ body: T; headers: Headers }> {
     const host = new URL(url).host;
-    return withRetry(
-      async (attempt) => {
-        // attempt.signal composes the caller's abort with withRetry's own
-        // clock, so an in-flight request is interrupted rather than left to
-        // run out on its own.
-        let response: Response;
-        try {
-          response = await fetch(url, {
-            headers: this.buildHeaders(),
-            signal: attempt.signal,
-          });
-        } catch (err) {
-          // ENOTFOUND is DNS saying the name does not exist — deterministic,
-          // unlike EAI_AGAIN (resolver unavailable) or a reset connection. The
-          // Discovery host failing to resolve means this server's own network
-          // is down, so that stays transient.
-          if (host !== DISCOVERY_HOST && fetchErrorCode(err) === 'ENOTFOUND') {
-            throw notFound(
-              `The request to ${host} failed DNS resolution (ENOTFOUND): no server answers at that hostname.`,
-              { host, reason: 'unknown_domain' },
-              { cause: err },
-            );
+    const remainingMs = this.remainingMs(ctx);
+    if (remainingMs === 0) throw callDeadlineExceeded(host);
+    const deadlineMs = capMs === undefined ? remainingMs : Math.min(capMs, remainingMs);
+    // The failure of the last attempt that got an answer; an attempt the deadline cut off has none.
+    let answered: unknown;
+    try {
+      return await withRetry(
+        async ({ signal }) => {
+          try {
+            return await this.fetchJsonAttempt<T>(url, host, signal, ctx, expected, capMs);
+          } catch (err) {
+            if (!signal.aborted) answered = err;
+            throw err;
           }
-          throw err;
-        }
+        },
+        {
+          operation: 'SocrataService.fetchJson',
+          context: ctx,
+          baseDelayMs: 500,
+          signal: ctx.signal,
+          deadlineMs,
+          ...(capMs === undefined ? {} : { maxRetries: 0 }),
+        },
+      );
+    } catch (err) {
+      if (!isDeadlineExpiry(err) || deadlineMs < remainingMs) throw err;
+      if (answered instanceof McpError && answered.data?.reason === 'rate_limited') throw answered;
+      throw callDeadlineExceeded(host, err);
+    }
+  }
 
-        if (!response.ok) {
-          // Preserve an unread copy for the framework's generic mapper. This
-          // method inspects the original body for Socrata-specific errors first;
-          // without a clone, generic failures lose their canonical data.body.
-          const errorResponse = response.clone();
-          // A structured SODA error (400 SoQL errors, 403 app-token rejection)
-          // carries a code key that varies by subsystem: compiler errors use
-          // `code`, query-coordinator errors use `errorCode` — accept either.
-          const body = parseJsonBody(await response.text());
-          const sodaErr =
-            typeof body === 'object' &&
-            body !== null &&
-            ('code' in body || 'errorCode' in body) &&
-            'message' in body
-              ? (body as SodaError)
-              : undefined;
+  /**
+   * One attempt of {@link fetchJsonResponse}, classified as {@link fetchJson}
+   * describes. `signal` composes the caller's abort with the deadline, so an
+   * in-flight request is interrupted rather than left to run out on its own.
+   * `capMs` is the caller's side-request cap, kept by the keyless repeat.
+   */
+  private async fetchJsonAttempt<T>(
+    url: string,
+    host: string,
+    signal: AbortSignal,
+    ctx: Context,
+    expected: ExpectedBody | undefined,
+    capMs: number | undefined,
+  ): Promise<{ body: T; headers: Headers }> {
+    let response: Response;
+    try {
+      response = await fetch(url, { headers: this.buildHeaders(), signal });
+    } catch (err) {
+      // ENOTFOUND is DNS saying the name does not exist — deterministic,
+      // unlike EAI_AGAIN (resolver unavailable) or a reset connection. The
+      // Discovery host failing to resolve means this server's own network
+      // is down, so that stays transient.
+      if (host !== DISCOVERY_HOST && fetchErrorCode(err) === 'ENOTFOUND') {
+        throw notFound(
+          `The request to ${host} failed DNS resolution (ENOTFOUND): no server answers at that hostname.`,
+          { host, reason: 'unknown_domain' },
+          { cause: err },
+        );
+      }
+      throw err;
+    }
 
-          if (sodaErr) {
-            // Map SODA error codes to appropriate MCP errors.
-            const socrataCode = sodaErr.code ?? sodaErr.errorCode ?? '';
-            if (response.status === 400) {
-              // All 400s with a SODA body are SoQL/query errors. The coordinator
-              // appends `; position: Map(…)` echoing the fully expanded SELECT
-              // and a caret line — hundreds of characters with nothing the
-              // caller needs — so the message stops before it. `data.column`
-              // names the offending token when upstream supplies one.
-              const column = sodaErr.data?.column;
-              throw validationError(
-                `SoQL error: ${sodaErr.message.replace(SODA_POSITION_ECHO, '')}`,
-                {
-                  reason: 'soql_error',
-                  socrataCode,
-                  ...(typeof column === 'string' && column ? { column } : {}),
-                },
-              );
-            }
-            if (
-              response.status === 403 &&
-              /app[_ ]token/i.test(sodaErr.message) &&
-              getServerConfig().appToken &&
-              !this.appTokenDisabled
-            ) {
-              // Optional-credential degradation: an invalid or revoked
-              // SOCRATA_APP_TOKEN is not a hard dependency — the same request
-              // succeeds keyless (the no-token default). Disable the token for the
-              // rest of the process, warn once, and retry this call keyless.
-              // buildHeaders() now omits X-App-Token, so the retry sends no token;
-              // a later app-token 403 (flag already set, or no token configured)
-              // is a genuine permissions failure and falls through to the generic
-              // path below — the keyless retry can never re-enter here. A
-              // private-dataset denial returns 403 without mentioning the app token
-              // and also takes the generic path. Never log the token value.
-              this.appTokenDisabled = true;
-              ctx.log.warning(
-                'SOCRATA_APP_TOKEN rejected (invalid or revoked) — falling back to keyless requests; per-IP rate limits apply. Replace or unset the token to restore higher limits.',
-                { reason: 'invalid_app_token' },
-              );
-              return this.fetchJsonResponse<T>(url, ctx, expected);
-            }
-          }
+    if (!response.ok) {
+      // Preserve an unread copy for the framework's generic mapper. This
+      // method inspects the original body for Socrata-specific errors first;
+      // without a clone, generic failures lose their canonical data.body.
+      const errorResponse = response.clone();
+      // A structured SODA error (400 SoQL errors, 403 app-token rejection)
+      // carries a code key that varies by subsystem: compiler errors use
+      // `code`, query-coordinator errors use `errorCode` — accept either.
+      const body = parseJsonBody(await response.text());
+      const sodaErr =
+        typeof body === 'object' &&
+        body !== null &&
+        ('code' in body || 'errorCode' in body) &&
+        'message' in body
+          ? (body as SodaError)
+          : undefined;
 
-          // The request URL stays out of the client-facing error data — a SODA
-          // URL carries the caller's SoQL in its query string — so the host is
-          // the only upstream locator surfaced.
-          const detail = upstreamMessage(body);
-          const sodaBody = isSodaErrorBody(body);
-          if (
-            response.status === 403 &&
-            sodaBody &&
-            detail === 'no row or column access to non-tabular tables'
-          ) {
-            throw validationError('This Socrata asset has no queryable rows (non-tabular asset).', {
-              host,
-              status: 403,
-              reason: 'not_tabular',
-            });
-          }
-          if (response.status === 429) {
-            throw await classifiedHttpError(
-              errorResponse,
-              `Socrata rate limited the request to ${host}${detail ? `: ${detail}` : '.'}`,
-              { host, reason: 'rate_limited' },
-            );
-          }
-          if (response.status === 404) {
-            if (host === DISCOVERY_HOST) {
-              throw await classifiedHttpError(
-                errorResponse,
-                `The Socrata Discovery catalog does not index the requested domain${detail ? ` (${detail})` : ''}.`,
-                { host, reason: 'unknown_domain' },
-              );
-            }
-            if (!sodaBody) {
-              throw await classifiedHttpError(
-                errorResponse,
-                `${host} does not look like a Socrata portal: its API answered HTTP 404 without a Socrata error body.`,
-                { host, reason: 'unknown_domain' },
-              );
-            }
-            throw await classifiedHttpError(
-              errorResponse,
-              `Socrata returned HTTP 404 from ${host}${detail ? `: ${detail}` : '.'}`,
-              { host, reason: 'not_found' },
-            );
-          }
-          if (response.status === 403 && !sodaBody && host !== DISCOVERY_HOST) {
-            // A gateway in front of the portal answered, not the SODA API
-            // (live: data.cityofberkeley.info returns this for any dataset ID it
-            // does not serve, and 200 for real ones). Whether the ID or the host
-            // is wrong is settled by the Discovery lookup in fetchDatasetJson.
-            throw notFound(
-              `${host} refused the request with HTTP 403 and a gateway page instead of a Socrata error.`,
-              { host, status: 403, reason: 'not_found' },
-            );
-          }
-
-          throw await httpErrorFromResponse(errorResponse, {
-            service: 'Socrata',
-            data: { host },
+      if (sodaErr) {
+        // Map SODA error codes to appropriate MCP errors.
+        const socrataCode = sodaErr.code ?? sodaErr.errorCode ?? '';
+        if (response.status === 400) {
+          // All 400s with a SODA body are SoQL/query errors. The coordinator
+          // appends `; position: Map(…)` echoing the fully expanded SELECT
+          // and a caret line — hundreds of characters with nothing the
+          // caller needs — so the message stops before it. `data.column`
+          // names the offending token when upstream supplies one.
+          const column = sodaErr.data?.column;
+          throw validationError(`SoQL error: ${sodaErr.message.replace(SODA_POSITION_ECHO, '')}`, {
+            reason: 'soql_error',
+            socrataCode,
+            ...(typeof column === 'string' && column ? { column } : {}),
           });
         }
+        if (
+          response.status === 403 &&
+          /app[_ ]token/i.test(sodaErr.message) &&
+          getServerConfig().appToken &&
+          !this.appTokenDisabled
+        ) {
+          // Optional-credential degradation: an invalid or revoked
+          // SOCRATA_APP_TOKEN is not a hard dependency — the same request
+          // succeeds keyless (the no-token default). Disable the token for the
+          // rest of the process, warn once, and retry this call keyless.
+          // buildHeaders() now omits X-App-Token, so the retry sends no token;
+          // a later app-token 403 (flag already set, or no token configured)
+          // is a genuine permissions failure and falls through to the generic
+          // path below — the keyless retry can never re-enter here. A
+          // private-dataset denial returns 403 without mentioning the app token
+          // and also takes the generic path. Never log the token value. A
+          // capped side request (the recount) repeats under the same cap: one
+          // attempt, no retries.
+          this.appTokenDisabled = true;
+          ctx.log.warning(
+            'SOCRATA_APP_TOKEN rejected (invalid or revoked) — falling back to keyless requests; per-IP rate limits apply. Replace or unset the token to restore higher limits.',
+            { reason: 'invalid_app_token' },
+          );
+          return this.fetchJsonResponse<T>(url, ctx, expected, capMs);
+        }
+      }
 
-        // `fetch` follows redirects; `response.url` is where it landed.
-        const finalHost = response.url ? new URL(response.url).host : host;
-        const body = parseJsonBody(await response.text());
-        if (body === undefined) {
-          if (finalHost !== host) {
-            throw notFound(
-              `${host} does not look like a Socrata portal: the request was redirected to ${finalHost}, which answered with a non-JSON page.`,
-              { host, redirectedTo: finalHost, reason: 'unknown_domain' },
-            );
-          }
-          throw serviceUnavailable(
-            'Socrata API returned a non-JSON response — likely rate-limited or endpoint unavailable.',
-            { host },
+      // The request URL stays out of the client-facing error data — a SODA
+      // URL carries the caller's SoQL in its query string — so the host is
+      // the only upstream locator surfaced.
+      const detail = upstreamMessage(body);
+      const sodaBody = isSodaErrorBody(body);
+      if (
+        response.status === 403 &&
+        sodaBody &&
+        detail === 'no row or column access to non-tabular tables'
+      ) {
+        throw validationError('This Socrata asset has no queryable rows (non-tabular asset).', {
+          host,
+          status: 403,
+          reason: 'not_tabular',
+        });
+      }
+      if (response.status === 429) {
+        throw await classifiedHttpError(
+          errorResponse,
+          `Socrata rate limited the request to ${host}${detail ? `: ${detail}` : '.'}`,
+          { host, reason: 'rate_limited' },
+        );
+      }
+      if (response.status === 404) {
+        if (host === DISCOVERY_HOST) {
+          throw await classifiedHttpError(
+            errorResponse,
+            `The Socrata Discovery catalog does not index the requested domain${detail ? ` (${detail})` : ''}.`,
+            { host, reason: 'unknown_domain' },
           );
         }
-        if (expected && !expected.matches(body)) {
-          if (finalHost !== host) {
-            throw notFound(
-              `${host} does not look like a Socrata portal: the request was redirected to ${finalHost}, which did not answer with ${expected.describe}.`,
-              { host, redirectedTo: finalHost, reason: 'unknown_domain' },
-            );
-          }
-          throw notFound(
-            expected.sameHostReason === 'not_found'
-              ? `${host} did not answer with ${expected.describe}.`
-              : `${host} does not look like a Socrata portal: its SODA endpoint did not answer with ${expected.describe}.`,
-            { host, reason: expected.sameHostReason },
+        if (!sodaBody) {
+          throw await classifiedHttpError(
+            errorResponse,
+            `${host} does not look like a Socrata portal: its API answered HTTP 404 without a Socrata error body.`,
+            { host, reason: 'unknown_domain' },
           );
         }
+        throw await classifiedHttpError(
+          errorResponse,
+          `Socrata returned HTTP 404 from ${host}${detail ? `: ${detail}` : '.'}`,
+          { host, reason: 'not_found' },
+        );
+      }
+      if (response.status === 403 && !sodaBody && host !== DISCOVERY_HOST) {
+        // A gateway in front of the portal answered, not the SODA API
+        // (live: data.cityofberkeley.info returns this for any dataset ID it
+        // does not serve, and 200 for real ones). Whether the ID or the host
+        // is wrong is settled by the Discovery lookup in fetchDatasetJson.
+        throw notFound(
+          `${host} refused the request with HTTP 403 and a gateway page instead of a Socrata error.`,
+          { host, status: 403, reason: 'not_found' },
+        );
+      }
 
-        return { body: body as T, headers: response.headers };
-      },
-      {
-        operation: 'SocrataService.fetchJson',
-        context: ctx,
-        baseDelayMs: 500,
-        signal: ctx.signal,
-      },
-    );
+      throw await httpErrorFromResponse(errorResponse, {
+        service: 'Socrata',
+        data: { host },
+      });
+    }
+
+    // `fetch` follows redirects; `response.url` is where it landed.
+    const finalHost = response.url ? new URL(response.url).host : host;
+    const body = parseJsonBody(await response.text());
+    if (body === undefined) {
+      if (finalHost !== host) {
+        throw notFound(
+          `${host} does not look like a Socrata portal: the request was redirected to ${finalHost}, which answered with a non-JSON page.`,
+          { host, redirectedTo: finalHost, reason: 'unknown_domain' },
+        );
+      }
+      throw serviceUnavailable(
+        'Socrata API returned a non-JSON response — likely rate-limited or endpoint unavailable.',
+        { host },
+      );
+    }
+    if (expected && !expected.matches(body)) {
+      if (finalHost !== host) {
+        throw notFound(
+          `${host} does not look like a Socrata portal: the request was redirected to ${finalHost}, which did not answer with ${expected.describe}.`,
+          { host, redirectedTo: finalHost, reason: 'unknown_domain' },
+        );
+      }
+      throw notFound(
+        expected.sameHostReason === 'not_found'
+          ? `${host} did not answer with ${expected.describe}.`
+          : `${host} does not look like a Socrata portal: its SODA endpoint did not answer with ${expected.describe}.`,
+        { host, reason: expected.sameHostReason },
+      );
+    }
+
+    return { body: body as T, headers: response.headers };
   }
 
   /**
@@ -682,14 +774,16 @@ export class SocrataService {
 
   /** A failed diagnostic is inconclusive; only a successful row array proves query sensitivity. */
   private async acceptsBareRows(domain: string, datasetId: string, ctx: Context): Promise<boolean> {
-    const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), QUERY_DIAGNOSTIC_TIMEOUT_MS);
+    const boundMs = Math.min(QUERY_DIAGNOSTIC_TIMEOUT_MS, this.remainingMs(ctx));
+    if (boundMs === 0) return false;
+    const bound = new AbortController();
+    const timer = setTimeout(() => bound.abort(), boundMs);
     try {
       const url = new URL(`https://${domain}/resource/${datasetId}.json`);
       url.searchParams.set('$limit', '1');
       const response = await fetch(url.toString(), {
         headers: this.buildHeaders(),
-        signal: AbortSignal.any([ctx.signal, timeout.signal]),
+        signal: AbortSignal.any([ctx.signal, bound.signal]),
       });
       ctx.signal.throwIfAborted();
       if (!response.ok) return false;
@@ -715,14 +809,16 @@ export class SocrataService {
    * not_found stands unchanged.
    */
   private async lookupDatasetDomain(datasetId: string, ctx: Context): Promise<string | undefined> {
+    const boundMs = Math.min(DISCOVERY_LOOKUP_TIMEOUT_MS, this.remainingMs(ctx));
+    if (boundMs === 0) return;
     // A manual timer rather than AbortSignal.timeout: fake timers drive it in tests.
-    const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), DISCOVERY_LOOKUP_TIMEOUT_MS);
+    const bound = new AbortController();
+    const timer = setTimeout(() => bound.abort(), boundMs);
     try {
       const params = new URLSearchParams({ ids: datasetId, limit: '1' });
       const response = await fetch(`${DISCOVERY_BASE}?${params.toString()}`, {
         headers: this.buildHeaders(),
-        signal: AbortSignal.any([timeout.signal, ctx.signal]),
+        signal: AbortSignal.any([bound.signal, ctx.signal]),
       });
       ctx.signal.throwIfAborted();
       if (!response.ok) return;
@@ -741,7 +837,11 @@ export class SocrataService {
 
   /**
    * Search for datasets across all portals or scoped to one domain.
-   * Uses the Socrata Discovery API.
+   * Uses the Socrata Discovery API. Each category and tag is its own
+   * `categories` / `tags` param, which Discovery ORs; a comma-joined
+   * `categories` value reads as one category name and matches nothing.
+   * `limit` and `offset` are sent as given: the caller keeps them inside the
+   * 10,000-match window Discovery serves.
    */
   async findDatasets(
     opts: FindDatasetsOptions,
@@ -754,11 +854,11 @@ export class SocrataService {
         params.set(key, value);
       }
     }
-    if (opts.categories?.length) params.set('categories', opts.categories.join(','));
-    if (opts.tags?.length) params.set('tags', opts.tags.join(','));
+    for (const category of opts.categories ?? []) params.append('categories', category);
+    for (const tag of opts.tags ?? []) params.append('tags', tag);
     if (opts.only) params.set('only', opts.only);
     if (opts.order) params.set('order', opts.order);
-    params.set('limit', String(Math.min(opts.limit ?? 10, 100)));
+    params.set('limit', String(opts.limit ?? 10));
     if (opts.offset) params.set('offset', String(opts.offset));
 
     const url = `${DISCOVERY_BASE}?${params.toString()}`;
@@ -883,7 +983,7 @@ export class SocrataService {
 
   /**
    * Assemble the SoQL query-string params shared by the single-page
-   * ({@link queryDataset}) and paginated ({@link streamDatasetRows}) fetch paths.
+   * ({@link queryDataset}) and staging ({@link fetchStagingRows}) fetch paths.
    * `$limit`/`$offset` are passed explicitly so each caller controls paging.
    */
   private buildQueryParams(
@@ -913,8 +1013,9 @@ export class SocrataService {
     }
 
     const host = normalizeDomain(opts.domain);
-    const limit = Math.min(opts.limit ?? 100, 5000);
-    const params = this.buildQueryParams(opts, limit, opts.offset ?? 0);
+    const limit = opts.limit ?? 100;
+    const offset = opts.offset ?? 0;
+    const params = this.buildQueryParams(opts, limit, offset);
 
     const dataUrl = `https://${host}/resource/${opts.datasetId}.json?${params.toString()}`;
     ctx.log.debug('SoQL query', { domain: host, datasetId: opts.datasetId });
@@ -929,25 +1030,13 @@ export class SocrataService {
       [...params.keys()].some((key) => key !== '$limit' && key !== '$offset'),
     );
 
-    // Fetch total count separately when result is at the limit (may be truncated).
-    // Skipped for grouped queries: the recount carries only where/search, so it
-    // would count matching source rows, not result groups — a misleading number.
-    let totalCount: number | undefined;
-    if (rows.length === limit && !opts.group) {
-      const countParams = new URLSearchParams();
-      countParams.set('$select', 'count(*)');
-      if (opts.where) countParams.set('$where', opts.where);
-      if (opts.search) countParams.set('$q', opts.search);
-      const countUrl = `https://${host}/resource/${opts.datasetId}.json?${countParams.toString()}`;
-
-      try {
-        const countResult = await this.fetchJson<[{ count: string }]>(countUrl, ctx, ROW_ARRAY);
-        const total = parseInt(countResult[0]?.count ?? '0', 10);
-        if (total > rows.length) totalCount = total;
-      } catch {
-        // Count fetch is best-effort — don't fail the query if it errors.
-      }
-    }
+    // Count the matching rows when the page cannot tell: it filled the limit
+    // (more may match), or it came back empty past offset 0 (the offset may
+    // have overshot a non-empty match).
+    const totalCount =
+      rows.length === limit || (rows.length === 0 && offset > 0)
+        ? await this.countQueryRows(host, opts, ctx)
+        : undefined;
 
     // Echo exactly what was sent — `$offset` rides along only when non-zero,
     // as in the request. A bare `$limit` is the default query.
@@ -967,21 +1056,59 @@ export class SocrataService {
   }
 
   /**
-   * Stream a dataset's matching rows across paginated SODA calls, bounded by a
-   * hard `maxRows` safety cap. Walks `$offset` in pages of {@link SODA_PAGE_MAX}
-   * until the upstream is exhausted (a short page) or the cap is reached.
-   *
-   * Distinct from {@link queryDataset}, whose single call bounds the inline
-   * response by the caller's `limit`: this drains the wider matching set (up to
-   * the cap) so a bounded copy can be staged onto a DataCanvas for SQL — the
-   * canvas is a bounded subset, never literally the full result set when the
-   * match exceeds the cap.
+   * Count the rows the query returns as written — groups for a grouped query,
+   * distinct values for a distinct select — by piping it into a count:
+   * `$query=SELECT … WHERE … GROUP BY … HAVING … SEARCH '…' |> SELECT count(*) AS n`.
+   * ORDER BY, LIMIT, and OFFSET are dropped; `search` becomes the SEARCH clause
+   * (`$query` cannot be combined with `$q`). Best-effort under
+   * {@link RECOUNT_TIMEOUT_MS}: any failure resolves `undefined`, except the
+   * caller's cancellation.
    */
-  async *streamDatasetRows(
+  private async countQueryRows(
+    host: string,
+    opts: QueryDatasetOptions,
+    ctx: Context,
+  ): Promise<number | undefined> {
+    const clauses = [`SELECT ${opts.select ?? '*'}`];
+    if (opts.where) clauses.push(`WHERE ${opts.where}`);
+    if (opts.group) clauses.push(`GROUP BY ${opts.group}`);
+    if (opts.having) clauses.push(`HAVING ${opts.having}`);
+    if (opts.search) clauses.push(`SEARCH '${opts.search.replaceAll("'", "''")}'`);
+    const params = new URLSearchParams({
+      $query: `${clauses.join(' ')} |> SELECT count(*) AS n`,
+    });
+    try {
+      const { body } = await this.fetchJsonResponse<{ n?: unknown }[]>(
+        `https://${host}/resource/${opts.datasetId}.json?${params.toString()}`,
+        ctx,
+        ROW_ARRAY,
+        RECOUNT_TIMEOUT_MS,
+      );
+      return toFiniteNumber(body[0]?.n);
+    } catch (err) {
+      ctx.signal.throwIfAborted();
+      ctx.log.debug('Query recount failed; total count omitted', {
+        datasetId: opts.datasetId,
+        error: String(err),
+      });
+      return;
+    }
+  }
+
+  /**
+   * Fetch up to `maxRows` matching rows in one SODA request — the bounded copy
+   * staged onto a DataCanvas for SQL: the caller's clauses and `$offset`, with
+   * `$limit` = `maxRows` (SODA 2.1 sets no per-request ceiling). One request,
+   * because SODA orders ties arbitrarily per request: `$offset` pages under a
+   * non-unique order overlap and skip rows. No tiebreaker is added — an `:id`
+   * order breaks grouped and aggregate queries (400) and `distinct` (500).
+   * Bounded by what is left of the call's deadline, like every request.
+   */
+  async fetchStagingRows(
     opts: QueryDatasetOptions,
     maxRows: number,
     ctx: Context,
-  ): AsyncGenerator<Record<string, unknown>> {
+  ): Promise<Record<string, unknown>[]> {
     if (!DATASET_ID_PATTERN.test(opts.datasetId)) {
       throw validationError(
         `Invalid dataset ID format: "${opts.datasetId}". Expected pattern like kzjm-xkqj.`,
@@ -990,42 +1117,35 @@ export class SocrataService {
     }
 
     const host = normalizeDomain(opts.domain);
-    let offset = opts.offset ?? 0;
-    let yielded = 0;
-    while (yielded < maxRows) {
-      const pageLimit = Math.min(SODA_PAGE_MAX, maxRows - yielded);
-      const params = this.buildQueryParams(opts, pageLimit, offset);
-      const url = `https://${host}/resource/${opts.datasetId}.json?${params.toString()}`;
-      ctx.log.debug('SoQL spill page', {
-        domain: host,
-        datasetId: opts.datasetId,
-        offset,
-        pageLimit,
-      });
-
-      const page = await this.fetchJson<Record<string, unknown>[]>(url, ctx, ROW_ARRAY);
-      for (const row of page) yield row;
-      yielded += page.length;
-
-      // A short page means the upstream is exhausted — stop before an empty fetch.
-      if (page.length < pageLimit) break;
-      offset += page.length;
-    }
+    const params = this.buildQueryParams(opts, maxRows, opts.offset ?? 0);
+    ctx.log.debug('SoQL staging request', { domain: host, datasetId: opts.datasetId, maxRows });
+    return await this.fetchJson<Record<string, unknown>[]>(
+      `https://${host}/resource/${opts.datasetId}.json?${params.toString()}`,
+      ctx,
+      ROW_ARRAY,
+    );
   }
 
   /**
    * List the curated well-known Socrata portals with live dataset counts.
    * Counts come from the TTL-cached Discovery catalog lookups; a portal whose
-   * count has never resolved carries `datasetCount: null` rather than failing
-   * the whole listing.
+   * count has never resolved — its lookup failed, or the call's deadline came
+   * first — carries `datasetCount: null` rather than failing the whole listing.
    */
   async listPortals(ctx: Context): Promise<PortalEntry[]> {
     if (Date.now() >= portalCountsNextRefreshAt) {
-      // Deduplicate concurrent refreshes — all callers await the same warm.
-      portalCountsRefresh ??= this.refreshPortalCounts(ctx).finally(() => {
-        portalCountsRefresh = undefined;
-      });
-      await portalCountsRefresh;
+      if (portalCountsRefresh) {
+        // Another call is already warming the cache: wait for it rather than
+        // asking again. Its deadline started first, so it bounds this wait.
+        // If that call's cancellation ends it, this call serves the counts
+        // resolved so far (null for the rest) instead of that failure.
+        await portalCountsRefresh.catch(() => ctx.signal.throwIfAborted());
+      } else {
+        portalCountsRefresh = this.refreshPortalCounts(ctx).finally(() => {
+          portalCountsRefresh = undefined;
+        });
+        await portalCountsRefresh;
+      }
     }
     return KNOWN_PORTALS.map((p) => ({
       ...p,
@@ -1038,14 +1158,17 @@ export class SocrataService {
    * known domain (`resultSetSize` is the count of dataset-type assets).
    * Per-domain failures are logged and skipped — last-known-good values are
    * retained. A refresh that resolves nothing schedules a short retry instead
-   * of holding an empty cache for the full TTL.
+   * of holding an empty cache for the full TTL. The call's deadline stops the
+   * refresh the same way, leaving the counts not yet fetched as they were and
+   * the cache due for the next call. Caller cancellation fails it.
    */
   private async refreshPortalCounts(ctx: Context): Promise<void> {
     const domains = KNOWN_PORTALS.map((p) => p.domain);
     ctx.log.info('Refreshing portal dataset counts', { domains: domains.length });
 
     let fetched = 0;
-    for (let i = 0; i < domains.length; i += PORTAL_COUNT_CONCURRENCY) {
+    let expired = false;
+    for (let i = 0; i < domains.length && !expired; i += PORTAL_COUNT_CONCURRENCY) {
       const chunk = domains.slice(i, i + PORTAL_COUNT_CONCURRENCY);
       await Promise.all(
         chunk.map(async (domain) => {
@@ -1053,6 +1176,11 @@ export class SocrataService {
             portalCounts.set(domain, await this.fetchPortalDatasetCount(domain, ctx));
             fetched++;
           } catch (err) {
+            ctx.signal.throwIfAborted();
+            if (isDeadlineExpiry(err)) {
+              expired = true;
+              return;
+            }
             ctx.log.warning('Portal dataset count fetch failed', {
               domain,
               error: String(err),
@@ -1060,6 +1188,14 @@ export class SocrataService {
           }
         }),
       );
+    }
+
+    if (expired) {
+      ctx.log.warning("Portal dataset count refresh stopped at the call's deadline", {
+        fetched,
+        unrefreshed: domains.length - fetched,
+      });
+      return;
     }
 
     portalCountsNextRefreshAt =

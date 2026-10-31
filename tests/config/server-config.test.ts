@@ -10,13 +10,14 @@ const SERVER_ENV_VARS = [
   'SOCRATA_APP_TOKEN',
   'SOCRATA_DEFAULT_DOMAIN',
   'SOCRATA_DATAFRAME_DROP_ENABLED',
+  'SOCRATA_CLAMP_LIMITS',
 ] as const;
 
 /**
  * Load a fresh copy of the lazily cached config module under the given env.
- * Unlisted variables are stubbed to `''` rather than deleted: importing the
- * framework config re-reads `.env`, which would refill a deleted key but never
- * overrides one that is set. `parseEnvConfig` reads `''` as unset.
+ * Unlisted variables are stubbed to `''` rather than deleted: getServerConfig()
+ * loads `.env` first, which would refill a deleted key but never overrides one
+ * that is set. `parseEnvConfig` reads `''` as unset.
  */
 async function loadConfig(env: Partial<Record<(typeof SERVER_ENV_VARS)[number], string>>) {
   for (const name of SERVER_ENV_VARS) vi.stubEnv(name, env[name] ?? '');
@@ -36,6 +37,24 @@ describe('getServerConfig', () => {
     expect(config.appToken).toBeUndefined();
     expect(config.defaultDomain).toBe('data.seattle.gov');
     expect(config.dataframeDropEnabled).toBe(false);
+    expect(config.clampLimits).toBe(true);
+  });
+
+  it.each([
+    ['true', true],
+    ['1', true],
+    ['false', false],
+    ['0', false],
+    ['off', false],
+  ])('parses SOCRATA_CLAMP_LIMITS=%s as %s', async (raw, expected) => {
+    const config = await loadConfig({ SOCRATA_CLAMP_LIMITS: raw });
+    expect(config.clampLimits).toBe(expected);
+  });
+
+  it('rejects an unrecognized SOCRATA_CLAMP_LIMITS value, naming the variable', async () => {
+    await expect(loadConfig({ SOCRATA_CLAMP_LIMITS: 'sometimes' })).rejects.toThrow(
+      /SOCRATA_CLAMP_LIMITS/,
+    );
   });
 
   it.each([

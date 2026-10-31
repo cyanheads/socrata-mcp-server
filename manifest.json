@@ -22,7 +22,8 @@
         "CANVAS_PROVIDER_TYPE": "none",
         "NODE_ENV": "production",
         "SOCRATA_APP_TOKEN": "${user_config.SOCRATA_APP_TOKEN}",
-        "SOCRATA_DEFAULT_DOMAIN": "${user_config.SOCRATA_DEFAULT_DOMAIN}"
+        "SOCRATA_DEFAULT_DOMAIN": "${user_config.SOCRATA_DEFAULT_DOMAIN}",
+        "SOCRATA_CLAMP_LIMITS": "${user_config.SOCRATA_CLAMP_LIMITS}"
       }
     }
   },
@@ -45,6 +46,13 @@
       "type": "string",
       "required": false,
       "default": "data.seattle.gov"
+    },
+    "SOCRATA_CLAMP_LIMITS": {
+      "title": "Clamp Over-Cap Limits",
+      "description": "Serve a limit above a tool's per-call cap at the cap, with a notice naming the offset that continues. Off, an over-cap limit is rejected.",
+      "type": "boolean",
+      "required": false,
+      "default": true
     }
   }
 }

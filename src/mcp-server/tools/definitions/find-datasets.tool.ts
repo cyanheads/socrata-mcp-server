@@ -6,8 +6,43 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { getServerConfig } from '@/config/server-config.js';
 import { inlineUpstream, upstreamBlockquote } from '@/mcp-server/tools/upstream-text.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
+
+/** Results one call returns, bounding the response size. */
+const FIND_LIMIT_CAP = 100;
+
+/**
+ * Discovery serves only the first 10,000 matches of a search: a request whose
+ * `offset + limit` passes it answers HTTP 400, and `resultSetSize` stops
+ * counting there. It is also the hard ceiling on `limit` while clamping is on.
+ */
+const DISCOVERY_RESULT_WINDOW = 10_000;
+
+/** SOCRATA_CLAMP_LIMITS, read at import: it sets the `limit` maximum the schema advertises. */
+const { clampLimits } = getServerConfig();
+
+/**
+ * The notice for a page served below the requested `limit`: by the per-call
+ * cap, where paging continues at `nextOffset`, and/or by the result window,
+ * past which no page exists, so the search must narrow instead.
+ */
+function limitNotice(
+  requested: number,
+  served: number,
+  nextOffset: number,
+  windowEnd: boolean,
+): string {
+  const causes = [
+    ...(requested > FIND_LIMIT_CAP ? [`the per-call cap is ${FIND_LIMIT_CAP}`] : []),
+    ...(windowEnd ? ['this page ends at match 10,000'] : []),
+  ];
+  const head = `The requested limit ${requested} was served as ${served}: ${causes.join(', and ')}.`;
+  return windowEnd
+    ? `${head} The Discovery catalog serves only the first 10,000 matches of a search, so no later page exists; narrow the search with domain, categories, tags, query, or only to reach the rest.`
+    : `${head} Continue with offset ${nextOffset}.`;
+}
 
 const DatasetResultSchema = z
   .object({
@@ -56,8 +91,15 @@ export const findDatasets = tool('socrata_find_datasets', {
     categories: z
       .array(z.string())
       .optional()
-      .describe('Filter by domain categories (e.g. ["Public Safety", "Transportation"]).'),
-    tags: z.array(z.string()).optional().describe('Filter by tags (e.g. ["covid19", "permits"]).'),
+      .describe(
+        'Filter by domain categories (e.g. ["Public Safety", "Transportation"]). Multiple values are ORed: a dataset in any listed category matches.',
+      ),
+    tags: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Filter by tags (e.g. ["covid19", "permits"]). Multiple values are ORed: a dataset carrying any listed tag matches.',
+      ),
     only: z
       .enum(['datasets', 'maps', 'files', 'calendars', 'stories'])
       .optional()
@@ -74,29 +116,57 @@ export const findDatasets = tool('socrata_find_datasets', {
       .number()
       .int()
       .min(1)
-      .max(100)
+      .max(clampLimits ? DISCOVERY_RESULT_WINDOW : FIND_LIMIT_CAP)
       .default(10)
-      .describe('Number of results to return (1–100). Default 10.'),
-    offset: z.number().int().min(0).default(0).describe('Pagination offset. Default 0.'),
+      .describe(
+        clampLimits
+          ? 'Number of results to return (1–10,000). One call returns at most 100 results: a larger limit is served as 100, with a notice naming the offset that continues. Default 10.'
+          : 'Number of results to return (1–100). Default 10.',
+      ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Pagination offset. Default 0. Must be below 10,000: the Discovery catalog serves only the first 10,000 matches of a search.',
+      ),
   }),
   output: z.object({
     results: z.array(DatasetResultSchema).describe('Matching datasets. Empty when no results.'),
   }),
 
-  // Agent-facing context: the query as sent, total match count, and an empty-result notice.
+  // Agent-facing context: the query as sent, total match count, and the page notice.
   // Reaches structuredContent and content[] automatically — no format() entry needed.
   enrichment: {
-    totalCount: z.number().describe('Total matches before pagination. 0 when empty.'),
+    totalCount: z
+      .number()
+      .describe(
+        'Total matches before pagination. 0 when empty. Discovery counts no further than 10,000: when totalCountCapped is true, 10,000 is a lower bound.',
+      ),
+    totalCountCapped: z
+      .boolean()
+      .optional()
+      .describe(
+        "True when totalCount reached Discovery's 10,000-match count ceiling, so more datasets may match than totalCount says. Absent otherwise.",
+      ),
     effectiveQuery: z.string().optional().describe('Search query applied, for reference.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Recovery hint when results are empty — echoes filters and suggests how to broaden. Absent on non-empty result pages.',
+        'Guidance for this page. When limit was served below the requested value (the 100-result per-call cap or the 10,000-match window), names the served limit and where paging continues; when results are empty, echoes the filters and suggests how to broaden, or, when offset passed the last match, names the offset to page below. Absent otherwise.',
       ),
   },
 
   errors: [
+    {
+      reason: 'result_window_exceeded',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'offset is 10,000 or more: the Discovery catalog serves only the first 10,000 matches of a search.',
+      recovery:
+        'Narrow the search with domain, categories, tags, query, or only so the matches you need fall within the first 10,000, then page with an offset below 10,000.',
+    },
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -118,6 +188,15 @@ export const findDatasets = tool('socrata_find_datasets', {
       recovery:
         'Pass a bare portal hostname such as data.cityofnewyork.us, or pick one from socrata_list_portals.',
     },
+    {
+      reason: 'retry_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'The Discovery API did not answer within the 50-second time limit the call shares across its requests, retries included.',
+      retryable: true,
+      thrownBy: 'service',
+      recovery:
+        'Retry with a narrower search: set domain, categories, tags, or a more specific query.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -125,7 +204,19 @@ export const findDatasets = tool('socrata_find_datasets', {
       query: input.query,
       domain: input.domain,
       limit: input.limit,
+      offset: input.offset,
     });
+
+    if (input.offset >= DISCOVERY_RESULT_WINDOW) {
+      throw ctx.fail(
+        'result_window_exceeded',
+        `offset ${input.offset} is past the Discovery result window: the catalog serves only the first 10,000 matches of a search.`,
+        { offset: input.offset },
+      );
+    }
+    // One effective limit: the per-call cap and the matches left in the window.
+    const limit = Math.min(input.limit, FIND_LIMIT_CAP, DISCOVERY_RESULT_WINDOW - input.offset);
+    const windowEnd = input.offset + limit === DISCOVERY_RESULT_WINDOW;
 
     const svc = getSocrataService();
     const query = input.query?.trim() ? input.query : undefined;
@@ -142,7 +233,7 @@ export const findDatasets = tool('socrata_find_datasets', {
           ...(tags ? { tags } : {}),
           ...(input.only ? { only: input.only } : {}),
           ...(input.order ? { order: input.order } : {}),
-          limit: input.limit,
+          limit,
           offset: input.offset,
         },
         ctx,
@@ -164,22 +255,36 @@ export const findDatasets = tool('socrata_find_datasets', {
       throw err;
     }
     const { results, totalCount } = found;
+    const totalCountCapped = totalCount >= DISCOVERY_RESULT_WINDOW;
 
     ctx.enrich.total(totalCount);
+    if (totalCountCapped) ctx.enrich({ totalCountCapped: true });
     if (query) ctx.enrich.echo(query);
 
-    if (results.length === 0) {
+    // Sentences of the page's one notice, joined once below.
+    const notices: string[] = [];
+    // A cut limit is named only when it withheld matches: past the window when
+    // this page ends there, otherwise on a later page.
+    const withheld = windowEnd ? totalCountCapped : input.offset + results.length < totalCount;
+    if (limit < input.limit && withheld) {
+      notices.push(limitNotice(input.limit, limit, input.offset + results.length, windowEnd));
+    }
+    if (results.length === 0 && input.offset > 0 && totalCount > 0) {
+      notices.push(
+        `The offset ${input.offset} is past the end of the ${totalCount} matching ${totalCount === 1 ? 'dataset' : 'datasets'}. Page with an offset below ${totalCount}.`,
+      );
+    } else if (results.length === 0) {
       const filtersApplied: string[] = [];
       if (input.query) filtersApplied.push(`query="${input.query}"`);
       if (input.domain) filtersApplied.push(`domain=${input.domain}`);
       if (input.categories?.length) filtersApplied.push(`categories=${input.categories.join(',')}`);
       if (input.tags?.length) filtersApplied.push(`tags=${input.tags.join(',')}`);
 
-      ctx.enrich.notice(
+      notices.push(
         `No datasets matched${filtersApplied.length ? ` with ${escapeMarkdownInline(filtersApplied.join(', '))}` : ''}. Try broader search terms, remove category/tag filters, or omit domain to search all portals.`,
       );
-      return { results: [] };
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
       results: results.map((r) => ({

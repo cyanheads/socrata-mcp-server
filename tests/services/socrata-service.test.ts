@@ -3,7 +3,7 @@
  * detection in fetchJson (both `code` and `errorCode` families, app-token 403
  * discrimination), the keyless degradation + retry on an invalid app token, the
  * Discovery portal scope in findDatasets (alias join + search_context), the
- * grouped-query recount skip in queryDataset, the TTL-cached per-portal dataset
+ * bounded `$query` recount in queryDataset, the TTL-cached per-portal dataset
  * counts in listPortals (same scope), row-count derivation from column-level
  * cachedContents in getDataset, status-based 404/429 classification with Retry-After honoring,
  * the not_found cross-portal Discovery lookup, domain normalization, and hosts
@@ -457,7 +457,7 @@ describe('SocrataService.findDatasets Discovery domain alias expansion (#21)', (
   });
 });
 
-describe('SocrataService.queryDataset total-count recount', () => {
+describe('SocrataService.queryDataset recount of the query as written (#50, #52)', () => {
   let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
@@ -476,50 +476,235 @@ describe('SocrataService.queryDataset total-count recount', () => {
     n: String(1000 - i),
   }));
 
-  it('skips the recount entirely for grouped queries — no total_count, single request', async () => {
-    fetchSpy.mockResolvedValue(jsonResponse(atLimitRows, 200, 'OK'));
+  const ok = (body: unknown) => jsonResponse(body, 200, 'OK');
 
-    const ctx = createMockContext();
-    const result = await svc.queryDataset(
+  /** The query-string params of the `index`th request the call sent. */
+  const sentParams = (index: number) =>
+    new URL(String(fetchSpy.mock.calls[index]?.[0])).searchParams;
+
+  const NYC = { domain: 'data.cityofnewyork.us', datasetId: '43nn-pn8j' };
+
+  it.each([
+    [
+      'a distinct select',
+      { select: 'distinct boro' },
+      'SELECT distinct boro |> SELECT count(*) AS n',
+    ],
+    [
+      'an ungrouped aggregate',
+      { select: 'count(*) as n' },
+      'SELECT count(*) as n |> SELECT count(*) AS n',
+    ],
+    [
+      'a grouped query with where, having, and order',
       {
-        domain: 'data.cityofchicago.org',
-        datasetId: 'ijzp-q8t2',
-        select: 'primary_type, count(*) as n',
-        group: 'primary_type',
+        select: 'boro, count(*) AS n',
+        where: "grade='A'",
+        group: 'boro',
+        having: 'n > 1000',
         order: 'n DESC',
-        limit: 5,
       },
-      ctx,
+      "SELECT boro, count(*) AS n WHERE grade='A' GROUP BY boro HAVING n > 1000 |> SELECT count(*) AS n",
+    ],
+    [
+      'a plain row query, select omitted',
+      { where: "boro='Manhattan'", order: 'camis' },
+      "SELECT * WHERE boro='Manhattan' |> SELECT count(*) AS n",
+    ],
+    [
+      'a search, its apostrophe doubled',
+      { search: "mcdonald's", where: "boro='Queens'" },
+      "SELECT * WHERE boro='Queens' SEARCH 'mcdonald''s' |> SELECT count(*) AS n",
+    ],
+  ])(
+    'recounts %s through one $query pipe, without $q, $order, $limit, or $offset',
+    async (_l, clauses, query) => {
+      fetchSpy.mockResolvedValueOnce(ok(atLimitRows)).mockResolvedValueOnce(ok([{ n: '6' }]));
+
+      const result = await svc.queryDataset(
+        { ...NYC, ...clauses, limit: 5, offset: 10 },
+        createMockContext(),
+      );
+
+      expect(result.totalCount).toBe(6);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(new URL(String(fetchSpy.mock.calls[1]?.[0])).pathname).toBe(
+        '/resource/43nn-pn8j.json',
+      );
+      expect([...sentParams(1).keys()]).toEqual(['$query']);
+      expect(sentParams(1).get('$query')).toBe(query);
+    },
+  );
+
+  it('returns the count even when it equals the rows returned (#50 repro 2)', async () => {
+    fetchSpy.mockResolvedValueOnce(ok([{ n: '294578' }])).mockResolvedValueOnce(ok([{ n: '1' }]));
+
+    const result = await svc.queryDataset(
+      { ...NYC, select: 'count(*) as n', limit: 1 },
+      createMockContext(),
     );
 
-    expect(result.rowCount).toBe(5);
+    expect(result).toMatchObject({ rowCount: 1, totalCount: 1 });
+  });
+
+  it('recounts an empty page past offset 0 (#52)', async () => {
+    fetchSpy.mockResolvedValueOnce(ok([])).mockResolvedValueOnce(ok([{ n: '108992' }]));
+
+    const result = await svc.queryDataset(
+      { ...NYC, where: "boro='Manhattan'", limit: 2, offset: 999_999 },
+      createMockContext(),
+    );
+
+    expect(result).toMatchObject({ rowCount: 0, totalCount: 108_992 });
+    expect(sentParams(1).get('$query')).toBe(
+      "SELECT * WHERE boro='Manhattan' |> SELECT count(*) AS n",
+    );
+  });
+
+  it('reports a zero count on an empty page past offset 0', async () => {
+    fetchSpy.mockResolvedValueOnce(ok([])).mockResolvedValueOnce(ok([{ n: '0' }]));
+
+    const result = await svc.queryDataset(
+      { ...NYC, where: "boro='Atlantis'", limit: 2, offset: 10 },
+      createMockContext(),
+    );
+
+    expect(result).toMatchObject({ rowCount: 0, totalCount: 0 });
+  });
+
+  it.each([
+    ['an empty page at offset 0', [], { where: "boro='Atlantis'", limit: 2 }],
+    ['a page under the limit', [{ boro: 'Bronx' }], { limit: 2, offset: 4 }],
+  ])('sends no recount for %s', async (_l, rows, clauses) => {
+    fetchSpy.mockResolvedValue(ok(rows));
+
+    const result = await svc.queryDataset({ ...NYC, ...clauses }, createMockContext());
+
     expect(result.totalCount).toBeUndefined();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('still recounts ungrouped queries at the limit — total_count present, count request issued', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(jsonResponse(atLimitRows, 200, 'OK'))
-      .mockResolvedValueOnce(jsonResponse([{ count: '8582001' }], 200, 'OK'));
+  it('omits the count when the recount answers without a numeric n', async () => {
+    fetchSpy.mockResolvedValueOnce(ok(atLimitRows)).mockResolvedValueOnce(ok([]));
 
-    const ctx = createMockContext();
-    const result = await svc.queryDataset(
-      {
-        domain: 'data.cityofchicago.org',
-        datasetId: 'ijzp-q8t2',
-        where: "primary_type = 'THEFT'",
-        limit: 5,
-      },
-      ctx,
-    );
+    const result = await svc.queryDataset({ ...NYC, limit: 5 }, createMockContext());
 
     expect(result.rowCount).toBe(5);
-    expect(result.totalCount).toBe(8582001);
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    // URLSearchParams encodes spaces as '+'; normalize before asserting.
-    const countUrl = decodeURIComponent(String(fetchSpy.mock.calls[1]?.[0])).replaceAll('+', ' ');
-    expect(countUrl).toContain('$select=count(*)');
-    expect(countUrl).toContain("$where=primary_type = 'THEFT'");
+    expect(result.totalCount).toBeUndefined();
+  });
+
+  describe('bounds: one attempt, min(15 s, the call deadline), cancellation kept', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('makes one recount attempt on a 503 and returns the query without a count', async () => {
+      fetchSpy
+        .mockResolvedValueOnce(ok(atLimitRows))
+        .mockImplementation(() =>
+          Promise.resolve(new Response('busy', { status: 503, statusText: 'Busy' })),
+        );
+
+      const { state, outcome } = track(svc.queryDataset({ ...NYC, limit: 5 }, createMockContext()));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(state.settled).toBe(true);
+      const { value } = await outcome;
+      expect(value).toMatchObject({ rowCount: 5 });
+      expect(value).not.toHaveProperty('totalCount');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('repeats a recount whose app token is refused once, keyless, with no retries', async () => {
+      mockGetServerConfig.mockReturnValue({
+        appToken: 'sentinel-token',
+        defaultDomain: 'data.seattle.gov',
+      });
+      // A fresh instance, so the token starts enabled.
+      const tokened = new SocrataService();
+      fetchSpy
+        .mockResolvedValueOnce(ok(atLimitRows))
+        .mockResolvedValueOnce(
+          jsonResponse(
+            { code: 'permission_denied', error: true, message: 'Invalid app_token specified' },
+            403,
+            'Forbidden',
+          ),
+        )
+        .mockImplementation(() =>
+          Promise.resolve(new Response('busy', { status: 503, statusText: 'Busy' })),
+        );
+
+      const { state, outcome } = track(
+        tokened.queryDataset({ ...NYC, limit: 5 }, createMockContext()),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(state.settled).toBe(true);
+      const { value } = await outcome;
+      expect(value).toMatchObject({ rowCount: 5 });
+      expect(value).not.toHaveProperty('totalCount');
+      await vi.advanceTimersByTimeAsync(30_000);
+      // The page, the refused recount, and its one keyless repeat.
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      const keyless = fetchSpy.mock.calls[2]?.[1] as RequestInit | undefined;
+      expect(keyless?.headers).not.toHaveProperty('X-App-Token');
+      expect(sentParams(2).has('$query')).toBe(true);
+    });
+
+    it('cuts a hung recount at 15 s and returns the query without a count', async () => {
+      fetchSpy.mockResolvedValueOnce(ok(atLimitRows)).mockImplementation(hangUntilAborted);
+
+      const { state, outcome } = track(svc.queryDataset({ ...NYC, limit: 5 }, createMockContext()));
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(state.settled).toBe(true);
+      const { value } = await outcome;
+      expect(value).toMatchObject({ rowCount: 5 });
+      expect(value).not.toHaveProperty('totalCount');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('cuts the recount at what is left of the call deadline when that is under 15 s', async () => {
+      // The page takes 40 s, leaving the recount 10 s.
+      fetchSpy
+        .mockImplementationOnce(answerAfter(40_000, () => ok(atLimitRows)))
+        .mockImplementation(hangUntilAborted);
+
+      const { state, outcome } = track(svc.queryDataset({ ...NYC, limit: 5 }, createMockContext()));
+      await vi.advanceTimersByTimeAsync(49_999);
+      expect(state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(state.settled).toBe(true);
+      const { value } = await outcome;
+      expect(value).toMatchObject({ rowCount: 5 });
+      expect(value).not.toHaveProperty('totalCount');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails as cancelled when the caller aborts during the recount', async () => {
+      const controller = new AbortController();
+      const cancellation = new DOMException('Caller cancelled the recount', 'AbortError');
+      fetchSpy.mockResolvedValueOnce(ok(atLimitRows)).mockImplementation((input, init) => {
+        controller.abort(cancellation);
+        return hangUntilAborted(input, init);
+      });
+
+      const { outcome } = track(
+        svc.queryDataset({ ...NYC, limit: 5 }, createMockContext({ signal: controller.signal })),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect((await outcome).error).toBe(cancellation);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
   });
 });
 
@@ -597,7 +782,7 @@ describe('SocrataService.queryDataset assembledQuery paging (#24)', () => {
     expect(result.assembledQuery).toBe('(default — all columns, up to limit)');
   });
 
-  it('carries $offset alongside $group/$having on a grouped query, with no total count', async () => {
+  it('carries $offset alongside $group/$having on a grouped query; the recount sends none', async () => {
     const result = await svc.queryDataset(
       {
         domain: 'data.cityofchicago.org',
@@ -615,10 +800,12 @@ describe('SocrataService.queryDataset assembledQuery paging (#24)', () => {
     expect(result.assembledQuery).toBe(
       '$select=primary_type, count(*) as n $group=primary_type $having=count(*) > 10 $order=n DESC $limit=1 $offset=5',
     );
-    // Grouped at the limit: the recount is skipped, so there is no total and one request.
-    expect(result.totalCount).toBeUndefined();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(dataUrl()).toContain('$offset=5');
+    // The page filled limit 1, so the group count follows: one $query, no paging params.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect([...new URL(String(fetchSpy.mock.calls[1]?.[0])).searchParams.keys()]).toEqual([
+      '$query',
+    ]);
   });
 });
 
@@ -865,6 +1052,43 @@ describe('SocrataService.listPortals portal-count cache', () => {
     expect(portals.find((p) => p.domain === 'data.wa.gov')?.datasetCount).toBeNull();
     expect(portals.find((p) => p.domain === 'data.cityofchicago.org')?.datasetCount).toBe(909);
   });
+
+  it('fails a cancelled refresh as cancelled and leaves the counts to the next call (#59)', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('Caller cancelled the listing', 'AbortError');
+    fetchSpy.mockImplementation((input, init) => {
+      controller.abort(cancellation);
+      return hangUntilAborted(input, init);
+    });
+
+    await expect(svc.listPortals(createMockContext({ signal: controller.signal }))).rejects.toBe(
+      cancellation,
+    );
+
+    // The cancelled refresh did not mark the cache fresh: the next call counts every portal.
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(countResponder);
+    const portals = await svc.listPortals(createMockContext());
+    expect(fetchSpy).toHaveBeenCalledTimes(39);
+    expect(portals.find((p) => p.domain === 'data.cityofchicago.org')?.datasetCount).toBe(909);
+  });
+
+  it('serves the counts it has to a call waiting on another call whose refresh was cancelled (#59)', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('Caller cancelled the listing', 'AbortError');
+    fetchSpy.mockImplementation(hangUntilAborted);
+
+    const first = svc.listPortals(createMockContext({ signal: controller.signal }));
+    const second = svc.listPortals(createMockContext());
+    controller.abort(cancellation);
+
+    await expect(first).rejects.toBe(cancellation);
+    const portals = await second;
+    expect(portals).toHaveLength(39);
+    expect(portals.every((p) => p.datasetCount === null)).toBe(true);
+    // One refresh for both calls: only its first chunk of 8 was asked before the abort.
+    expect(fetchSpy).toHaveBeenCalledTimes(8);
+  });
 });
 
 describe('SocrataService.getDataset row-count derivation', () => {
@@ -1031,7 +1255,7 @@ describe('SocrataService.getDataset row-count derivation', () => {
   });
 });
 
-describe('SocrataService.streamDatasetRows pagination', () => {
+describe('SocrataService.fetchStagingRows — one request per canvas copy (#51)', () => {
   let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
 
@@ -1045,69 +1269,68 @@ describe('SocrataService.streamDatasetRows pagination', () => {
     vi.clearAllMocks();
   });
 
-  async function drain(gen: AsyncGenerator<Record<string, unknown>>) {
-    const rows: Record<string, unknown>[] = [];
-    for await (const row of gen) rows.push(row);
-    return rows;
-  }
-
-  it('walks $offset across pages until a short page signals exhaustion', async () => {
-    // A full first page (5000 = the SODA per-request ceiling) forces a second
-    // request; the short second page ends the walk before an empty fetch.
-    const page1 = Array.from({ length: 5000 }, (_, i) => ({ id: String(i) }));
-    const page2 = Array.from({ length: 10 }, (_, i) => ({ id: String(5000 + i) }));
-    fetchSpy
-      .mockResolvedValueOnce(jsonResponse(page1, 200, 'OK'))
-      .mockResolvedValueOnce(jsonResponse(page2, 200, 'OK'));
-
-    const ctx = createMockContext();
-    const rows = await drain(
-      svc.streamDatasetRows(
-        { domain: 'data.seattle.gov', datasetId: 'kzjm-xkqj', where: "type = 'X'" },
-        50_000,
-        ctx,
-      ),
-    );
-
-    // Canvas would stage all 5010 rows — more than a single page's worth.
-    expect(rows).toHaveLength(5010);
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const url1 = decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0])).replaceAll('+', ' ');
-    const url2 = decodeURIComponent(String(fetchSpy.mock.calls[1]?.[0])).replaceAll('+', ' ');
-    // First page from offset 0 (no $offset), second continues at 5000.
-    expect(url1).toContain('$limit=5000');
-    expect(url1).not.toContain('$offset');
-    expect(url2).toContain('$offset=5000');
-    // The shared where-clause rides every page.
-    expect(url1).toContain("$where=type = 'X'");
-    expect(url2).toContain("$where=type = 'X'");
-  });
-
-  it('clamps the page $limit to the remaining cap and stops at maxRows', async () => {
-    // maxRows below the page ceiling — the request must ask for exactly maxRows,
-    // and a full page at the cap ends the walk without a second fetch.
+  it('sends the caller clauses and $offset with $limit = maxRows, and no tiebreaker', async () => {
     fetchSpy.mockResolvedValueOnce(
       jsonResponse(
-        Array.from({ length: 3 }, (_, i) => ({ id: String(i) })),
+        Array.from({ length: 12 }, (_, i) => ({ id: String(i), primary_type: 'THEFT' })),
         200,
         'OK',
       ),
     );
 
-    const ctx = createMockContext();
-    const rows = await drain(
-      svc.streamDatasetRows({ domain: 'data.seattle.gov', datasetId: 'kzjm-xkqj' }, 3, ctx),
+    const rows = await svc.fetchStagingRows(
+      {
+        domain: 'data.cityofchicago.org',
+        datasetId: 'ijzp-q8t2',
+        select: 'id, primary_type',
+        where: 'year=2025',
+        order: 'primary_type',
+        offset: 10,
+      },
+      50_000,
+      createMockContext(),
     );
 
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(12);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0]))).toContain('$limit=3');
+    expect(Object.fromEntries(new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams)).toEqual({
+      $select: 'id, primary_type',
+      $where: 'year=2025',
+      $order: 'primary_type',
+      $limit: '50000',
+      $offset: '10',
+    });
+  });
+
+  it('asks once even when the answer is 5,000 rows, the old page size', async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        Array.from({ length: 5000 }, (_, i) => ({ id: String(i) })),
+        200,
+        'OK',
+      ),
+    );
+
+    const rows = await svc.fetchStagingRows(
+      { domain: 'data.seattle.gov', datasetId: 'kzjm-xkqj', group: 'type', select: 'type' },
+      50_000,
+      createMockContext(),
+    );
+
+    expect(rows).toHaveLength(5000);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const params = new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams;
+    expect(params.get('$limit')).toBe('50000');
+    expect(params.has('$offset')).toBe(false);
   });
 
   it('throws invalid_id before any fetch for a malformed dataset id', async () => {
-    const ctx = createMockContext();
     await expect(
-      drain(svc.streamDatasetRows({ domain: 'data.seattle.gov', datasetId: 'bad!!' }, 100, ctx)),
+      svc.fetchStagingRows(
+        { domain: 'data.seattle.gov', datasetId: 'bad!!' },
+        100,
+        createMockContext(),
+      ),
     ).rejects.toMatchObject({ data: { reason: 'invalid_id' } });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -1553,7 +1776,7 @@ describe('normalizeDomain and URL-shaped domains (#35)', () => {
     expect(meta.domain).toBe('data.cdc.gov');
   });
 
-  it('reports the normalized domain from queryDataset and builds every page URL from it', async () => {
+  it('reports the normalized domain from queryDataset and builds every request URL from it', async () => {
     fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse([{ a: '1' }], 200, 'OK')));
 
     const ctx = createMockContext();
@@ -1561,17 +1784,14 @@ describe('normalizeDomain and URL-shaped domains (#35)', () => {
       { domain: 'HTTPS://Data.CDC.gov/browse', datasetId: 'bi63-dtpu' },
       ctx,
     );
-    const streamed: unknown[] = [];
-    for await (const row of svc.streamDatasetRows(
+    const staged = await svc.fetchStagingRows(
       { domain: 'https://data.cdc.gov/', datasetId: 'bi63-dtpu' },
       10,
       ctx,
-    )) {
-      streamed.push(row);
-    }
+    );
 
     expect(result.domain).toBe('data.cdc.gov');
-    expect(streamed).toHaveLength(1);
+    expect(staged).toHaveLength(1);
     for (const call of fetchSpy.mock.calls) expect(originOf(call[0])).toBe('https://data.cdc.gov');
   });
 
@@ -1780,6 +2000,85 @@ describe('SocrataService.findDatasets column_names mapping (#29)', () => {
   });
 });
 
+describe('SocrataService.findDatasets Discovery request params (#54, #55)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    // Answers the Discovery host only; any other request fails the test.
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (new URL(String(input)).hostname === 'api.us.socrata.com') {
+        return jsonResponse({ results: [], resultSetSize: 0 }, 200, 'OK');
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  /** The single Discovery request the search sent. */
+  function sentUrl(): string {
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    return String(fetchSpy.mock.calls[0]?.[0]);
+  }
+
+  it('sends one categories param per category, which Discovery ORs (#54)', async () => {
+    // Live 2026-10-30, NYC: Public Safety 141 + Transportation 373 → 514 as
+    // repeated params; the comma-joined form reads as one category name → 0.
+    await svc.findDatasets(
+      {
+        domain: 'data.cityofnewyork.us',
+        categories: ['Public Safety', 'Transportation'],
+        limit: 1,
+      },
+      createMockContext(),
+    );
+
+    const url = sentUrl();
+    expect(new URL(url).searchParams.getAll('categories')).toEqual([
+      'Public Safety',
+      'Transportation',
+    ]);
+    expect(url).toContain('categories=Public+Safety&categories=Transportation');
+  });
+
+  it('sends one tags param per tag and keeps a comma inside a tag intact (#54)', async () => {
+    await svc.findDatasets({ tags: ['doe', 'education', 'a,b'] }, createMockContext());
+
+    expect(new URL(sentUrl()).searchParams.getAll('tags')).toEqual(['doe', 'education', 'a,b']);
+  });
+
+  it('sends a single category or tag as one param', async () => {
+    await svc.findDatasets(
+      { categories: ['Public Safety'], tags: ['covid19'] },
+      createMockContext(),
+    );
+
+    const params = new URL(sentUrl()).searchParams;
+    expect(params.getAll('categories')).toEqual(['Public Safety']);
+    expect(params.getAll('tags')).toEqual(['covid19']);
+  });
+
+  it('sends limit and offset as given, omitting a zero offset', async () => {
+    // The tool bounds limit to the per-call cap and the 10,000-match window
+    // before calling; the service sends the page it is asked for.
+    await svc.findDatasets({ only: 'datasets', limit: 50, offset: 9950 }, createMockContext());
+    const paged = new URL(sentUrl()).searchParams;
+    expect(paged.get('limit')).toBe('50');
+    expect(paged.get('offset')).toBe('9950');
+
+    fetchSpy.mockClear();
+    await svc.findDatasets({ query: 'x', limit: 10, offset: 0 }, createMockContext());
+    const first = new URL(sentUrl()).searchParams;
+    expect(first.get('limit')).toBe('10');
+    expect(first.has('offset')).toBe(false);
+  });
+});
+
 /**
  * A `fetch` rejection in the shape Bun 1.4 raises for a failed request: a
  * TypeError carrying the errno code on the error itself (live, Bun 1.4.0:
@@ -1848,12 +2147,6 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
   const discoveryCalls = () =>
     fetchSpy.mock.calls.filter((c) => originOf(c[0]) === DISCOVERY_ORIGIN);
   const sodaCalls = () => fetchSpy.mock.calls.filter((c) => originOf(c[0]) !== DISCOVERY_ORIGIN);
-
-  async function drain(gen: AsyncGenerator<Record<string, unknown>>) {
-    const rows: Record<string, unknown>[] = [];
-    for await (const row of gen) rows.push(row);
-    return rows;
-  }
 
   /** Run a call under fake timers so every retry backoff elapses; return its McpError-or-Error. */
   async function settledUnderFakeTimers(run: () => Promise<unknown>): Promise<unknown> {
@@ -1941,7 +2234,7 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
       },
     );
 
-    it('queryDataset and streamDatasetRows map it the same way', async () => {
+    it('queryDataset and fetchStagingRows map it the same way', async () => {
       fetchSpy.mockImplementation(() => Promise.reject(bunFetchError('ENOTFOUND', host)));
 
       const queried = await settledUnderFakeTimers(() =>
@@ -1950,12 +2243,10 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
       expect((queried as McpError).data).toMatchObject({ reason: 'unknown_domain' });
       expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-      const streamed = await settledUnderFakeTimers(() =>
-        drain(
-          svc.streamDatasetRows({ domain: host, datasetId: 'erm2-nwe9' }, 100, createMockContext()),
-        ),
+      const staged = await settledUnderFakeTimers(() =>
+        svc.fetchStagingRows({ domain: host, datasetId: 'erm2-nwe9' }, 100, createMockContext()),
       );
-      expect((streamed as McpError).data).toMatchObject({ reason: 'unknown_domain' });
+      expect((staged as McpError).data).toMatchObject({ reason: 'unknown_domain' });
       expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
   });
@@ -2017,16 +2308,14 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('streamDatasetRows: a non-array page is unknown_domain on the first attempt', async () => {
+    it('fetchStagingRows: a non-array answer is unknown_domain on the first attempt', async () => {
       fetchSpy.mockImplementation(() => Promise.resolve(opengovRedirect()));
 
       const err = await rejectionOf(
-        drain(
-          svc.streamDatasetRows(
-            { domain: 'data.oxnard.org', datasetId: 'zzzz-9999' },
-            100,
-            createMockContext(),
-          ),
+        svc.fetchStagingRows(
+          { domain: 'data.oxnard.org', datasetId: 'zzzz-9999' },
+          100,
+          createMockContext(),
         ),
       );
 
@@ -2291,5 +2580,339 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
 
     expect(err.data).toMatchObject({ reason: 'unknown_domain', host: 'catalog.data.gov' });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * A `fetch` that never answers on its own: it settles only when its signal
+ * aborts, rejecting with the signal's reason, as a hung upstream does once the
+ * request is cut.
+ */
+function hangUntilAborted(_input: unknown, init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
+
+/** A `fetch` that answers with `make()` after `delayMs` unless its signal aborts first. */
+function answerAfter(delayMs: number, make: () => Response) {
+  return (_input: unknown, init?: RequestInit): Promise<Response> =>
+    new Promise((resolve, reject) => {
+      const signal = init?.signal;
+      const timer = setTimeout(() => resolve(make()), delayMs);
+      signal?.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
+}
+
+/** Follow a call under fake timers: `state.settled` flips when it settles; `outcome` holds its value or error. */
+function track(promise: Promise<unknown>) {
+  const state = { settled: false };
+  const outcome = promise.then(
+    (value: unknown) => {
+      state.settled = true;
+      return { value, error: undefined as unknown };
+    },
+    (error: unknown) => {
+      state.settled = true;
+      return { value: undefined as unknown, error };
+    },
+  );
+  return { state, outcome };
+}
+
+describe('SocrataService per-call deadline (#59)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetPortalCountCache();
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetPortalCountCache();
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  type Ctx = ReturnType<typeof createMockContext>;
+
+  /** Each entry point that reaches an upstream: its first host, and the requests a hung upstream sees. */
+  const entryPoints: ReadonlyArray<[string, string, number, (ctx: Ctx) => Promise<unknown>]> = [
+    [
+      'getDataset',
+      'data.cityofnewyork.us',
+      1,
+      (ctx) => svc.getDataset('data.cityofnewyork.us', 'erm2-nwe9', ctx),
+    ],
+    [
+      'queryDataset',
+      'data.cityofnewyork.us',
+      1,
+      (ctx) =>
+        svc.queryDataset(
+          { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', order: 'borough' },
+          ctx,
+        ),
+    ],
+    ['findDatasets', 'api.us.socrata.com', 1, (ctx) => svc.findDatasets({ query: 'crime' }, ctx)],
+    // The count refresh asks in chunks of 8; the first chunk never answers.
+    ['listPortals', 'api.us.socrata.com', 8, (ctx) => svc.listPortals(ctx)],
+    [
+      'fetchStagingRows',
+      'data.cityofnewyork.us',
+      1,
+      (ctx) =>
+        svc.fetchStagingRows(
+          { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', order: 'borough' },
+          50_000,
+          ctx,
+        ),
+    ],
+  ];
+
+  // listPortals degrades at the deadline instead of failing (#31): tested on its own below.
+  it.each(entryPoints.filter(([name]) => name !== 'listPortals'))(
+    '%s fails with Timeout retry_deadline_exceeded at 50 s when the upstream never answers',
+    async (_name, host, requests, call) => {
+      fetchSpy.mockImplementation(hangUntilAborted);
+
+      const { state, outcome } = track(call(createMockContext()));
+      await vi.advanceTimersByTimeAsync(49_999);
+      expect(state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const { error } = await outcome;
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+      expect((error as McpError).message).toBe(
+        `The request to ${host} did not complete within this call's 50-second time limit.`,
+      );
+      expect((error as McpError).data).toEqual({
+        reason: 'retry_deadline_exceeded',
+        host,
+        deadlineMs: 50_000,
+        retryable: true,
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(requests);
+    },
+  );
+
+  it.each(entryPoints)(
+    '%s keeps a caller abort in flight a cancellation, not a timeout',
+    async (_name, _host, _requests, call) => {
+      const controller = new AbortController();
+      const cancellation = new DOMException('Caller cancelled the request', 'AbortError');
+      fetchSpy.mockImplementation((input, init) => {
+        controller.abort(cancellation);
+        return hangUntilAborted(input, init);
+      });
+
+      const { outcome } = track(call(createMockContext({ signal: controller.signal })));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect((await outcome).error).toBe(cancellation);
+    },
+  );
+
+  /** A Discovery count answer for every portal: 42 datasets each. */
+  const countOf42 = () => Promise.resolve(jsonResponse({ resultSetSize: 42 }, 200, 'OK'));
+
+  it('listPortals serves the catalog with null counts when the deadline cuts the refresh, and leaves the counts due (#31, #59)', async () => {
+    fetchSpy.mockImplementation(hangUntilAborted);
+
+    const { state, outcome } = track(svc.listPortals(createMockContext()));
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    const { value, error } = await outcome;
+    expect(error).toBeUndefined();
+    const portals = value as { domain: string; datasetCount: number | null }[];
+    expect(portals).toHaveLength(39);
+    expect(portals.every((p) => p.datasetCount === null)).toBe(true);
+    // Only the first chunk of 8 was asked; nothing is sent once the deadline has passed.
+    expect(fetchSpy).toHaveBeenCalledTimes(8);
+
+    // The cut refresh did not mark the cache fresh: the next call counts every portal.
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementation(countOf42);
+    const next = await svc.listPortals(createMockContext());
+    expect(fetchSpy).toHaveBeenCalledTimes(39);
+    expect(next.every((p) => p.datasetCount === 42)).toBe(true);
+  });
+
+  it('listPortals keeps the counts that resolved before the deadline cut the refresh (#59)', async () => {
+    let asked = 0;
+    // The first chunk of 8 answers at once; every later request hangs.
+    fetchSpy.mockImplementation((input, init) =>
+      asked++ < 8 ? countOf42() : hangUntilAborted(input, init),
+    );
+
+    const { outcome } = track(svc.listPortals(createMockContext()));
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    const { value, error } = await outcome;
+    expect(error).toBeUndefined();
+    const counts = (value as { datasetCount: number | null }[]).map((p) => p.datasetCount);
+    expect(counts.slice(0, 8)).toEqual(Array(8).fill(42));
+    expect(counts.slice(8).every((c) => c === null)).toBe(true);
+    // Chunks one and two were asked; the rest were not sent after the deadline.
+    expect(fetchSpy).toHaveBeenCalledTimes(16);
+  });
+
+  it('stops a 5xx retry ladder at the deadline instead of running it out', async () => {
+    // Every attempt answers 503 after 20 s: four attempts would run past 80 s;
+    // the third starts near 41 s and is cut at 50 s.
+    fetchSpy.mockImplementation(
+      answerAfter(20_000, () => new Response('busy', { status: 503, statusText: 'Busy' })),
+    );
+
+    const { state, outcome } = track(
+      svc.getDataset('data.cdc.gov', 'bi63-dtpu', createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const { error } = await outcome;
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', host: 'data.cdc.gov' },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports the 429, not the deadline, when the attempt the deadline cut followed a rate limit', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        jsonResponse({ message: 'Slow down' }, 429, 'Too Many Requests', { 'Retry-After': '1' }),
+      )
+      .mockImplementation(hangUntilAborted);
+
+    const { outcome } = track(
+      svc.queryDataset({ domain: 'data.cdc.gov', datasetId: 'bi63-dtpu' }, createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    const { error } = await outcome;
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: '1' },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds the Discovery ID lookup by what is left of the deadline, not its own 2.5 s', async () => {
+    fetchSpy.mockImplementation((input, init) =>
+      originOf(input) === DISCOVERY_ORIGIN
+        ? hangUntilAborted(input, init)
+        : answerAfter(49_000, () =>
+            jsonResponse(
+              { code: 'not_found', error: true, message: 'Not found' },
+              404,
+              'Not Found',
+            ),
+          )(input, init),
+    );
+
+    const { state, outcome } = track(
+      svc.getDataset('data.seattle.gov', 'erm2-nwe9', createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const { error } = await outcome;
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: 'Dataset erm2-nwe9 not found on data.seattle.gov.',
+      data: { reason: 'not_found', dataset_id: 'erm2-nwe9' },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds the gateway diagnostic by what is left of the deadline, not its own 2.5 s', async () => {
+    fetchSpy.mockImplementation((input, init) => {
+      const url = new URL(String(input));
+      if (url.origin === DISCOVERY_ORIGIN)
+        return Promise.resolve(discoveryIdsResponse('data.cityofnewyork.us'));
+      if (url.search === '?%24limit=1') return hangUntilAborted(input, init);
+      return answerAfter(48_000, gateway403)(input, init);
+    });
+
+    const { state, outcome } = track(
+      svc.queryDataset(
+        { domain: 'data.cityofnewyork.us', datasetId: 'erm2-nwe9', select: 'x' },
+        createMockContext(),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const { error } = await outcome;
+    expect(error).toMatchObject({ data: { reason: 'unknown_domain' } });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('shares one deadline across the requests of a call, and starts a fresh one per call', async () => {
+    const ctx = createMockContext();
+    fetchSpy
+      .mockImplementationOnce(answerAfter(30_000, () => jsonResponse([{ a: '1' }], 200, 'OK')))
+      .mockImplementation(hangUntilAborted);
+
+    // One row under limit 2: no recount, so the query is one request taking 30 s.
+    const query = track(
+      svc.queryDataset({ domain: 'data.cdc.gov', datasetId: 'bi63-dtpu', limit: 2 }, ctx),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect((await query.outcome).value).toMatchObject({ rowCount: 1 });
+
+    // Staging gets the 20 s the query left.
+    const staging = track(
+      svc.fetchStagingRows({ domain: 'data.cdc.gov', datasetId: 'bi63-dtpu' }, 50_000, ctx),
+    );
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(staging.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await staging.outcome).error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded' },
+    });
+
+    // Past the deadline, the same call sends nothing more.
+    const late = await rejectionOf(
+      svc.fetchStagingRows({ domain: 'data.cdc.gov', datasetId: 'bi63-dtpu' }, 50_000, ctx),
+    );
+    expect(late.data).toMatchObject({ reason: 'retry_deadline_exceeded' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // A new call has its own 50 s.
+    const fresh = track(svc.getDataset('data.cdc.gov', 'bi63-dtpu', createMockContext()));
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(fresh.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await fresh.outcome).error).toMatchObject({
+      data: { reason: 'retry_deadline_exceeded' },
+    });
   });
 });

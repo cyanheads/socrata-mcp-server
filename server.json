@@ -42,6 +42,13 @@
           "default": "false"
         },
         {
+          "name": "SOCRATA_CLAMP_LIMITS",
+          "description": "Serve a limit above a tool's per-call cap at the cap, with a notice naming the offset that continues, instead of rejecting it. Set to false to restore each cap as the schema maximum.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -85,6 +92,13 @@
           "format": "boolean",
           "isRequired": false,
           "default": "false"
+        },
+        {
+          "name": "SOCRATA_CLAMP_LIMITS",
+          "description": "Serve a limit above a tool's per-call cap at the cap, with a notice naming the offset that continues, instead of rejecting it. Set to false to restore each cap as the schema maximum.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "MCP_HTTP_HOST",

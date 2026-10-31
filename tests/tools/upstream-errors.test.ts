@@ -16,7 +16,8 @@ import { findDatasets } from '@/mcp-server/tools/definitions/find-datasets.tool.
 import { getDataset } from '@/mcp-server/tools/definitions/get-dataset.tool.js';
 import { listPortals } from '@/mcp-server/tools/definitions/list-portals.tool.js';
 import { queryDataset } from '@/mcp-server/tools/definitions/query-dataset.tool.js';
-import { initSocrataService } from '@/services/socrata/socrata-service.js';
+import { initSocrataService, resetPortalCountCache } from '@/services/socrata/socrata-service.js';
+import { contentText } from './content-text.js';
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: vi.fn().mockReturnValue({ defaultDomain: 'data.seattle.gov' }),
@@ -345,6 +346,154 @@ describe('socrata_list_portals advertises no error contract (#31)', () => {
   it('has no errors field at all', () => {
     expect(listPortals.errors).toBeUndefined();
     expect('errors' in listPortals).toBe(false);
+  });
+});
+
+/**
+ * A `fetch` that never answers on its own: it settles only when its signal
+ * aborts, rejecting with the signal's reason.
+ */
+function hangUntilAborted(_input: unknown, init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
+
+describe('the 50-second call deadline on every tool that reaches an upstream (#59)', () => {
+  beforeEach(() => {
+    resetPortalCountCache();
+    vi.useFakeTimers();
+    fetchSpy.mockImplementation(hangUntilAborted);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetPortalCountCache();
+  });
+
+  const deadlineOf = (errors: readonly { reason: string; recovery: string }[] | undefined) =>
+    errors?.find((e) => e.reason === 'retry_deadline_exceeded');
+
+  it.each([
+    [
+      'socrata_find_datasets',
+      () => runToolContract(findDatasets, { query: 'crime' }),
+      deadlineOf(findDatasets.errors),
+      'api.us.socrata.com',
+    ],
+    [
+      'socrata_get_dataset',
+      () =>
+        runToolContract(getDataset, { domain: 'data.cityofnewyork.us', dataset_id: 'erm2-nwe9' }),
+      deadlineOf(getDataset.errors),
+      'data.cityofnewyork.us',
+    ],
+    [
+      'socrata_query_dataset',
+      () =>
+        runToolContract(queryDataset, {
+          domain: 'data.cityofnewyork.us',
+          dataset_id: 'erm2-nwe9',
+          order: 'borough',
+        }),
+      deadlineOf(queryDataset.errors),
+      'data.cityofnewyork.us',
+    ],
+  ] as const)(
+    '%s fails with a retryable Timeout and its own recovery when the upstream never answers',
+    async (_name, call, declared, host) => {
+      const pending = call();
+      await vi.advanceTimersByTimeAsync(50_000);
+      const { error, text } = errorOf(await pending);
+
+      expect(declared).toMatchObject({ code: JsonRpcErrorCode.Timeout, retryable: true });
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.message).toBe(
+        `The request to ${host} did not complete within this call's 50-second time limit.`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'retry_deadline_exceeded',
+        host,
+        deadlineMs: 50_000,
+        retryable: true,
+      });
+      expect(error.data.recovery?.hint).toBe(declared?.recovery);
+      expect(text).toContain(declared?.recovery ?? '<no recovery>');
+      expect(text).toContain('reason retry_deadline_exceeded · retryable');
+    },
+  );
+
+  it('socrata_list_portals returns its curated catalog with null counts when the count refresh outlasts the deadline (#31)', async () => {
+    const pending = runToolContract(listPortals, {});
+    await vi.advanceTimersByTimeAsync(50_000);
+    const result = await pending;
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      portals: { domain: string; dataset_count: number | null }[];
+      totalCount: number;
+    };
+    expect(structured.totalCount).toBe(39);
+    expect(structured.portals).toHaveLength(39);
+    expect(structured.portals.every((p) => p.dataset_count === null)).toBe(true);
+    const text = contentText(result);
+    expect(text).toContain('| data.cityofchicago.org | City of Chicago | unavailable |');
+    expect(text).not.toContain('retry_deadline_exceeded');
+  });
+
+  it('names the query levers in the socrata_query_dataset recovery', () => {
+    const recovery = deadlineOf(queryDataset.errors)?.recovery;
+    expect(recovery).toContain('where');
+    expect(recovery).toContain('limit');
+    expect(recovery).toContain('order');
+  });
+
+  it('names the search filters in the socrata_find_datasets recovery', () => {
+    const recovery = deadlineOf(findDatasets.errors)?.recovery;
+    for (const lever of ['domain', 'categories', 'tags', 'query']) {
+      expect(recovery).toContain(lever);
+    }
+  });
+
+  it('bounds a socrata://datasets read by the same deadline', async () => {
+    const params = datasetResource.params!.parse({
+      domain: 'data.cityofnewyork.us',
+      datasetId: 'erm2-nwe9',
+    });
+    const pending = Promise.resolve()
+      .then(() => datasetResource.handler(params, createMockContext()))
+      .then(
+        () => new Error('expected a rejection'),
+        (err: unknown) => err,
+      );
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    expect(await pending).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', host: 'data.cityofnewyork.us' },
+    });
+  });
+
+  it('reports a caller abort during the portal-count refresh as cancelled, not as a degraded listing', async () => {
+    const controller = new AbortController();
+    fetchSpy.mockImplementation((input, init) => {
+      controller.abort(new DOMException('Caller cancelled the listing', 'AbortError'));
+      return hangUntilAborted(input, init);
+    });
+
+    const { error, text } = errorOf(
+      await runToolContract(listPortals, {}, { context: { signal: controller.signal } }),
+    );
+
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error.message).toContain('Caller cancelled the listing');
+    expect(text).toContain('Caller cancelled the listing');
   });
 });
 
