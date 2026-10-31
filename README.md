@@ -66,7 +66,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - Per-portal dataset counts fetched live from the Discovery API, cached ~24 hours (`0` means the portal exposes no dataset assets to the catalog; `null` means the count is temporarily unavailable)
 - Client-side substring filtering on domain or organization name; pagination up to 200 per page with offset
 - Returns domain (pass to `socrata_find_datasets`), organization name, and approximate dataset count; the count includes datasets a portal federates from another Socrata tenant (Austin, Illinois, Mesa, and San Francisco publish through a data hub; Seattle catalogs under a sibling tenant)
-- Never fails on an upstream error — a count that cannot be fetched, or that the call's 50-second deadline cuts off, comes back `null` and the listing still returns
+- Never fails on an upstream error — a count that cannot be fetched, or that the call's 50-second deadline cuts off, keeps its last known value, or comes back `null` when it has none, and the listing still returns
 - Past-the-end notice: an empty page at `offset > 0` names the offset to page below
 
 ---
@@ -150,7 +150,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 ### `socrata://portals` <sub>resource</sub>
 
 - Curated catalog of 39 known Socrata portals, cursor-paginated (`cursor` param, default 50 per page, capped at 200)
-- Returns domain, organization name, and approximate dataset count (`0` = no dataset assets, `null` = temporarily unavailable, including a count cut off by the 50-second call deadline), cached ~24 hours
+- Returns domain, organization name, and approximate dataset count (`0` = no dataset assets, `null` = temporarily unavailable; a count the 50-second call deadline cuts off keeps its last known value, or is `null` when it has none), cached ~24 hours
 - Pass `domain` to `socrata_find_datasets` to scope a search to one portal
 
 ---
