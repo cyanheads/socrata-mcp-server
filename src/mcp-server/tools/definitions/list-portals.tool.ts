@@ -29,7 +29,7 @@ export const listPortals = tool('socrata_list_portals', {
   title: 'List Socrata Portals',
   description:
     'List known Socrata-powered government open-data portals with their domain, organization name, and approximate dataset count. The catalog is a curated list of 39 well-known portals; dataset counts are fetched from the Discovery API and cached for ~24 hours. Filtering is client-side substring match on the query parameter. Use this first when you do not know which portal to target, then pass the domain to socrata_find_datasets.',
-  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
       .string()

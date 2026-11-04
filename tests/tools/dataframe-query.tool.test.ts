@@ -29,11 +29,10 @@ async function contractError(input: { canvas_id: string; sql: string }) {
 }
 
 /**
- * Import a fresh copy of the tool with SOCRATA_CLAMP_LIMITS set to `flag`, with
- * the canvas accessor that copy reads. The `limit` schema reads the flag at
- * import, so each mode needs its own module instance. `''` reads as unset:
- * importing the config loads `.env`, which refills a deleted key but never
- * overrides a set one.
+ * Import a fresh copy of the tool, with the canvas accessor that copy reads,
+ * then parse the config with SOCRATA_CLAMP_LIMITS set to `flag`, as setup()
+ * does: the `limit` schema reads the parsed switch. `''` reads as unset and is
+ * never overwritten by a `.env` load, as a deleted key would be.
  */
 async function loadDataframeQuery(flag: string) {
   vi.stubEnv('SOCRATA_CLAMP_LIMITS', flag);
@@ -42,6 +41,7 @@ async function loadDataframeQuery(flag: string) {
     '@/mcp-server/tools/definitions/dataframe-query.tool.js'
   );
   const accessor = await import('@/services/canvas-accessor.js');
+  (await import('@/config/server-config.js')).getServerConfig();
   return { def, setCanvas: accessor.setCanvas };
 }
 
@@ -698,6 +698,32 @@ describe('dataframeQuery over a real DuckDB canvas (#55, #60)', () => {
     expect(sc).toEqual({ rows, row_count: 1, sql, canvas_id: canvasId });
     expect(readSqlEcho(contentText(result))).toBe(sql);
   });
+
+  it('renders STRUCT, MAP, LIST, and nested LIST cells as the JSON structuredContent carries (#66)', async () => {
+    const { result, sc } = await run({
+      sql: "SELECT {'a': 1, 'b': 'x|y'} AS s, list_value('x,y', 'z') AS l, MAP {'k|1': 'v'} AS m, [[1, 2], [3]] AS n, NULL AS z, 'plain' AS t FROM big_rows LIMIT 1",
+    });
+
+    const [row] = sc.rows;
+    expect(row).toEqual({
+      s: { a: 1, b: 'x|y' },
+      l: ['x,y', 'z'],
+      m: [{ key: 'k|1', value: 'v' }],
+      n: [[1, 2], [3]],
+      z: null,
+      t: 'plain',
+    });
+    const lines = contentText(result).split('\n');
+    const header = lines.findIndex((l) => l.startsWith('| s |'));
+    expect(tableCells(lines[header + 2] as string)).toEqual([
+      JSON.stringify(row?.s),
+      JSON.stringify(row?.l),
+      JSON.stringify(row?.m),
+      JSON.stringify(row?.n),
+      '',
+      'plain',
+    ]);
+  });
 });
 
 describe('dataframeQuery SQL echo (#60)', () => {
@@ -746,5 +772,95 @@ describe('dataframeQuery SQL echo (#60)', () => {
     ['a trailing line break', 'SELECT 1\n'],
   ])('reads back byte-identical from content[] for SQL with %s', (_label, sql) => {
     expect(readSqlEcho(echoText(sql))).toBe(sql);
+  });
+});
+
+/**
+ * The cells of one GFM table row as a CommonMark reader takes them back: split
+ * on every pipe no backslash escapes, each cell trimmed, with backslash escapes
+ * of ASCII punctuation read as the character.
+ */
+function tableCells(line: string): string[] {
+  const cells: string[] = [];
+  let cell = '';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i] as string;
+    const next = line[i + 1];
+    if (ch === '\\' && next !== undefined && /[!-/:-@[-`{-~]/.test(next)) {
+      cell += next;
+      i++;
+    } else if (ch === '|') {
+      cells.push(cell.trim());
+      cell = '';
+    } else {
+      cell += ch;
+    }
+  }
+  // The row opens and closes on a pipe: drop the empty edges.
+  return cells.slice(1);
+}
+
+describe('format() renders STRUCT, MAP, and LIST cells as their JSON (#66)', () => {
+  /** A row holding DuckDB's nested shapes beside every scalar kind. */
+  const NESTED_ROW = {
+    s: { a: 1, b: 'x|y' },
+    l: ['x,y', 'z'],
+    m: [{ key: 'k|1', value: 'v' }],
+    n: [[1, 2], [3]],
+    deep: { list: [{ k: [1, { z: null }] }] },
+    empty: [],
+    z: null,
+    t: 'plain',
+    i: 42,
+    b: true,
+  };
+
+  /** The format() text for `rows`. */
+  function formatText(rows: Record<string, unknown>[]): string {
+    const blocks = dataframeQuery.format!({
+      rows,
+      row_count: rows.length,
+      sql: 'SELECT * FROM t',
+      canvas_id: 'abc1234567',
+    });
+    return (blocks[0] as { text?: string }).text ?? '';
+  }
+
+  it('reads every nested cell back as JSON.stringify of its value, each in its own cell', () => {
+    const lines = formatText([NESTED_ROW]).split('\n');
+    const header = lines.findIndex((l) => l.startsWith('| s |'));
+    expect(header).toBeGreaterThan(-1);
+
+    expect(tableCells(lines[header] as string)).toEqual(Object.keys(NESTED_ROW));
+    expect(tableCells(lines[header + 2] as string)).toEqual([
+      '{"a":1,"b":"x|y"}',
+      '["x,y","z"]',
+      '[{"key":"k|1","value":"v"}]',
+      '[[1,2],[3]]',
+      '{"list":[{"k":[1,{"z":null}]}]}',
+      '[]',
+      '',
+      'plain',
+      '42',
+      'true',
+    ]);
+  });
+
+  it('keeps scalar cells and an empty null cell as they rendered before', () => {
+    const text = formatText([{ t: 'Theft', year: 2023, ok: false, z: null }]);
+
+    expect(text).toContain(
+      '\n| t | year | ok | z |\n| :--- | :--- | :--- | :--- |\n| Theft | 2023 | false |  |',
+    );
+  });
+
+  it('keeps the fenced JSON rendering past 10 columns for nested values', () => {
+    const row = Object.fromEntries(
+      Array.from({ length: 11 }, (_, i) => [`c${i}`, i === 0 ? NESTED_ROW.s : i]),
+    );
+    const text = formatText([row]);
+
+    expect(text).toContain(`\n\`\`\`json\n${JSON.stringify(row)}\n\`\`\``);
+    expect(text).not.toContain('| c0 |');
   });
 });

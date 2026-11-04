@@ -89,9 +89,8 @@ export const findDatasets = tool('socrata_find_datasets', {
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { DatasetIdSchema } from '@/mcp-server/dataset-id-schema.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
-import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}', {
   name: 'socrata-dataset',
@@ -99,12 +98,10 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
   mimeType: 'application/json',
   params: z.object({
     domain: z.string().describe('Portal domain (e.g. data.seattle.gov).'),
-    datasetId: z.string().describe('Four-by-four dataset ID (e.g. kzjm-xkqj).'),
+    // Four-by-four pattern in either letter case, lowercased before the handler sees it.
+    datasetId: DatasetIdSchema.describe('Four-by-four dataset ID (e.g. kzjm-xkqj).'),
   }),
   async handler(params, ctx) {
-    if (!DATASET_ID_PATTERN.test(params.datasetId)) {
-      throw validationError(`Invalid dataset ID format: "${params.datasetId}".`, { datasetId: params.datasetId });
-    }
     const svc = getSocrataService();
     const meta = await svc.getDataset(params.domain, params.datasetId, ctx);
     return { dataset_id: meta.datasetId, domain: meta.domain, name: meta.name };
@@ -132,9 +129,9 @@ export const exploreOpenData = prompt('explore_open_data', {
 ### Server config
 
 ```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
+// src/config/server-config.ts — parsed once in setup(), separate from framework config
 import { z } from '@cyanheads/mcp-ts-core';
-import { parseConfig, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   appToken: z.string().optional().describe('Socrata app token for higher rate limits.'),
@@ -143,19 +140,21 @@ const ServerConfigSchema = z.object({
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
-  if (!_config) {
-    // Tool modules read this at import; under Node only parseConfig() loads `.env`.
-    parseConfig();
-    _config = parseEnvConfig(ServerConfigSchema, {
-      appToken: 'SOCRATA_APP_TOKEN',
-      defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
-    });
-  }
+  _config ??= parseEnvConfig(ServerConfigSchema, {
+    appToken: 'SOCRATA_APP_TOKEN',
+    defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
+  });
   return _config;
+}
+
+// src/index.ts — first in setup(), after createApp() has loaded `.env` and parsed its own config
+setup(core) {
+  getServerConfig();
+  initSocrataService();
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which `createApp()` prints as a clean startup banner when thrown during its setup; a read at module import, as the tool modules here make, exits with a stack trace instead (#62).
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which `createApp()` prints as a clean startup banner when thrown during its setup — so nothing parses config at module import, where the same error exits on a raw stack trace. Reads that must happen earlier go through `server-config.ts` helpers that never parse: `activeServerConfig()` (the parsed config, or the schema defaults before `setup()`) backs the `limit` schemas, whose cap is enforced in a `.check()` and advertised through `.meta()` getters (`cappedLimit()` in `src/mcp-server/tools/capped-limit.ts`); `dataframeDropFlag()` reads `SOCRATA_DATAFRAME_DROP_ENABLED` alone for the drop tool's import-time gate (invalid reads as off until `setup()` rejects it). Both that gate and the `CANVAS_PROVIDER_TYPE` default in `src/index.ts` run before `createApp()` loads `.env` under Node, so they call `preloadEnvFile()` — a non-throwing `process.loadEnvFile()` that leaves every load failure to `createApp()`.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -263,7 +262,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                              # createApp() entry point — registers all tools, resources, prompts
   config/
-    server-config.ts                    # SOCRATA_APP_TOKEN, SOCRATA_DEFAULT_DOMAIN, SOCRATA_DATAFRAME_DROP_ENABLED, SOCRATA_CLAMP_LIMITS (Zod schema; loads `.env` via `parseConfig()` before its first parse)
+    server-config.ts                    # SOCRATA_APP_TOKEN, SOCRATA_DEFAULT_DOMAIN, SOCRATA_DATAFRAME_DROP_ENABLED, SOCRATA_CLAMP_LIMITS (Zod schema; parsed in setup(), never at import)
   services/
     canvas-accessor.ts                  # Module-level DataCanvas accessor, wired in setup()
     socrata/

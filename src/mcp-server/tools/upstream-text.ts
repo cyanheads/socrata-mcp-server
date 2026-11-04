@@ -36,6 +36,17 @@ export function escapeTableCell(value: string): string {
 }
 
 /**
+ * A row value as a markdown table cell: an object or array (a geo column, a
+ * DuckDB STRUCT, MAP, or LIST) as its JSON, a scalar as its string, null or
+ * absent as an empty cell — escaped by {@link escapeTableCell}.
+ */
+export function tableCell(value: unknown): string {
+  return escapeTableCell(
+    value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value ?? ''),
+  );
+}
+
+/**
  * Frame upstream free text as a labeled blockquote — the data boundary for
  * multi-line descriptions. Normalizes CRLF and prefixes every line with `> `
  * so the whole block reads as quoted upstream data.

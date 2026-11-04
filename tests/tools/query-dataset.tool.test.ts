@@ -22,13 +22,18 @@ vi.mock('@/services/socrata/socrata-service.js', () => ({
   getSocrataService: vi.fn(),
 }));
 
+/**
+ * The server config the tool reads — SOCRATA_CLAMP_LIMITS among it, which the
+ * `limit` schema reads on each parse and emission. Each test starts with
+ * clamping on.
+ */
+const serverConfig = vi.hoisted(() => ({ defaultDomain: 'data.seattle.gov', clampLimits: true }));
+
 vi.mock('@/config/server-config.js', () => ({
-  getServerConfig: vi
-    .fn()
-    .mockReturnValue({ defaultDomain: 'data.seattle.gov', clampLimits: true }),
+  getServerConfig: () => serverConfig,
+  activeServerConfig: () => serverConfig,
 }));
 
-import { getServerConfig } from '@/config/server-config.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const mockQueryDataset = vi.fn();
@@ -37,6 +42,7 @@ const mockService = { queryDataset: mockQueryDataset, fetchStagingRows: mockFetc
 
 beforeEach(() => {
   vi.clearAllMocks();
+  serverConfig.clampLimits = true;
   (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(mockService);
   // Default: nothing to stage unless a canvas test supplies rows.
   mockFetchStagingRows.mockResolvedValue([]);
@@ -49,19 +55,6 @@ afterEach(() => {
 /** The text of a `format()` result. */
 function formatText(output: Parameters<NonNullable<typeof queryDataset.format>>[0]): string {
   return (queryDataset.format!(output)[0] as { text?: string }).text ?? '';
-}
-
-/**
- * A fresh copy of the tool built with SOCRATA_CLAMP_LIMITS = `clampLimits`:
- * the switch is read once, at import, to set the `limit` maximum.
- */
-async function loadQueryDataset(clampLimits: boolean) {
-  (getServerConfig as ReturnType<typeof vi.fn>).mockReturnValueOnce({
-    defaultDomain: 'data.seattle.gov',
-    clampLimits,
-  });
-  vi.resetModules();
-  return (await import('@/mcp-server/tools/definitions/query-dataset.tool.js')).queryDataset;
 }
 
 describe('queryDataset', () => {
@@ -95,13 +88,16 @@ describe('queryDataset', () => {
     );
   });
 
-  it('throws invalid_id for malformed dataset ID', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
+  it('rejects a malformed dataset ID at input validation, naming the four-by-four form', () => {
+    const parsed = queryDataset.input.safeParse({ dataset_id: 'not-valid!!' });
 
-    const input = queryDataset.input.parse({ dataset_id: 'not-valid!!' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ['dataset_id'],
+        message: expect.stringContaining('four-by-four'),
+      }),
+    ]);
   });
 
   it('returns rows and assembled query for valid input', async () => {
@@ -775,10 +771,10 @@ describe('queryDataset', () => {
 
     it('tells callers in the description and the limit describe that a small limit still stages the copy', () => {
       expect(queryDataset.description).toContain(
-        'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.',
+        'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. Pass stage false to return the page alone, without staging.',
       );
       expect(queryDataset.input.shape.limit.description).toContain(
-        'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.',
+        'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page, or stage false to return the page without staging.',
       );
       expect(queryDataset.output.shape.table_name.description).toContain('socrata_dataframe_query');
     });
@@ -1067,20 +1063,21 @@ describe('a limit above the 5,000-row per-call cap (#55)', () => {
     expect(limitSchema(queryDataset)).toMatchObject({
       maximum: 50_000,
       description:
-        'Max rows to return (1–50,000). One call returns at most 5,000 rows: a larger limit is served as 5,000, with a notice naming the offset that continues when more rows match. Default 100. Use with offset for pagination. When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.',
+        'Max rows to return (1–50,000). One call returns at most 5,000 rows: a larger limit is served as 5,000, with a notice naming the offset that continues when more rows match. Default 100. Use with offset for pagination. When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page, or stage false to return the page without staging.',
     });
   });
 
   it('with the switch off, keeps 5,000 as the schema maximum and rejects limit 8000 as invalid arguments', async () => {
-    const clampOff = await loadQueryDataset(false);
+    serverConfig.clampLimits = false;
 
-    expect(limitSchema(clampOff)).toMatchObject({
+    expect(limitSchema(queryDataset)).toMatchObject({
       maximum: 5000,
       description:
-        'Max rows to return (1–5000). Default 100. Use with offset for pagination. When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.',
+        'Max rows to return (1–5000). Default 100. Use with offset for pagination. When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page, or stage false to return the page without staging.',
     });
-    const error = errorOf(await runToolContract(clampOff, { ...CHICAGO, limit: 8000 }));
+    const error = errorOf(await runToolContract(queryDataset, { ...CHICAGO, limit: 8000 }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(mockQueryDataset).not.toHaveBeenCalled();
   });
 });
 

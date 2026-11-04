@@ -16,13 +16,19 @@ vi.mock('@/services/socrata/socrata-service.js', () => ({
   getSocrataService: vi.fn(),
 }));
 
+/**
+ * SOCRATA_CLAMP_LIMITS as the `limit` schemas read it, on each parse. Each test
+ * starts with clamping on.
+ */
+const clamp = vi.hoisted(() => ({ clampLimits: true }));
+
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: vi
     .fn()
     .mockReturnValue({ defaultDomain: 'data.seattle.gov', clampLimits: true }),
+  activeServerConfig: () => ({ defaultDomain: 'data.seattle.gov', ...clamp }),
 }));
 
-import { getServerConfig } from '@/config/server-config.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
 const mockFindDatasets = vi.fn();
@@ -38,30 +44,20 @@ const mockService = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clamp.clampLimits = true;
   (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(mockService);
 });
 
-/**
- * A fresh copy of the find-datasets tool built with SOCRATA_CLAMP_LIMITS =
- * `clampLimits`: the switch is read once, at import, to set the `limit` maximum.
- */
-async function loadFindDatasets(clampLimits: boolean) {
-  (getServerConfig as ReturnType<typeof vi.fn>).mockReturnValueOnce({
-    defaultDomain: 'data.seattle.gov',
-    clampLimits,
-  });
-  vi.resetModules();
-  return (await import('@/mcp-server/tools/definitions/find-datasets.tool.js')).findDatasets;
+/** The find-datasets tool, its `limit` schema reading SOCRATA_CLAMP_LIMITS = `clampLimits`. */
+function findDatasetsClamped(clampLimits: boolean) {
+  clamp.clampLimits = clampLimits;
+  return findDatasets;
 }
 
-/** A fresh copy of the query-dataset tool built with SOCRATA_CLAMP_LIMITS = `clampLimits`. */
-async function loadQueryDataset(clampLimits: boolean) {
-  (getServerConfig as ReturnType<typeof vi.fn>).mockReturnValueOnce({
-    defaultDomain: 'data.seattle.gov',
-    clampLimits,
-  });
-  vi.resetModules();
-  return (await import('@/mcp-server/tools/definitions/query-dataset.tool.js')).queryDataset;
+/** The query-dataset tool, its `limit` schema reading SOCRATA_CLAMP_LIMITS = `clampLimits`. */
+function queryDatasetClamped(clampLimits: boolean) {
+  clamp.clampLimits = clampLimits;
+  return queryDataset;
 }
 
 /** The error envelope a contract run returns — carries the framework's declared-hint fill. */
@@ -104,16 +100,16 @@ describe('input validation — schema boundaries', () => {
     );
   });
 
-  it('rejects findDatasets limit 101 when SOCRATA_CLAMP_LIMITS is off', async () => {
-    const clampOff = await loadFindDatasets(false);
+  it('rejects findDatasets limit 101 when SOCRATA_CLAMP_LIMITS is off', () => {
+    const clampOff = findDatasetsClamped(false);
     expect(() => clampOff.input.parse({ limit: 101 })).toThrow();
     expect(clampOff.input.parse({ limit: 100 }).limit).toBe(100);
   });
 
   it.each([true, false])(
     'rejects findDatasets limit above the 10,000 ceiling (10001) with clamping %s',
-    async (clampLimits) => {
-      const def = await loadFindDatasets(clampLimits);
+    (clampLimits) => {
+      const def = findDatasetsClamped(clampLimits);
       expect(() => def.input.parse({ limit: 10_001 })).toThrow();
     },
   );
@@ -153,16 +149,16 @@ describe('input validation — schema boundaries', () => {
     );
   });
 
-  it('rejects queryDataset limit 5001 when SOCRATA_CLAMP_LIMITS is off', async () => {
-    const clampOff = await loadQueryDataset(false);
+  it('rejects queryDataset limit 5001 when SOCRATA_CLAMP_LIMITS is off', () => {
+    const clampOff = queryDatasetClamped(false);
     expect(() => clampOff.input.parse({ dataset_id: 'abcd-1234', limit: 5001 })).toThrow();
     expect(clampOff.input.parse({ dataset_id: 'abcd-1234', limit: 5000 }).limit).toBe(5000);
   });
 
   it.each([true, false])(
     'rejects queryDataset limit above the 50,000 ceiling (50001) with clamping %s',
-    async (clampLimits) => {
-      const def = await loadQueryDataset(clampLimits);
+    (clampLimits) => {
+      const def = queryDatasetClamped(clampLimits);
       expect(() => def.input.parse({ dataset_id: 'abcd-1234', limit: 50_001 })).toThrow();
     },
   );
@@ -201,62 +197,56 @@ describe('input validation — schema boundaries', () => {
 // ---------------------------------------------------------------------------
 
 describe('dataset ID validation', () => {
-  it('getDataset rejects ID with uppercase letters', async () => {
+  /**
+   * A malformed ID fails argument validation (-32602) on its contract run, and
+   * the handler never reaches the service.
+   */
+  async function expectRejectedAtInput(def: typeof getDataset | typeof queryDataset, id: string) {
+    expect(def.input.safeParse({ dataset_id: id }).success).toBe(false);
+    const error = errorOf(await runToolContract(def, { dataset_id: id }));
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data.reason).toBe('invalid_arguments');
+    expect(mockGetDataset).not.toHaveBeenCalled();
+    expect(mockQueryDataset).not.toHaveBeenCalled();
+  }
+
+  it('getDataset accepts an ID with uppercase letters and sends it lowercased', async () => {
+    mockGetDataset.mockResolvedValue({
+      datasetId: 'abcd-1234',
+      domain: 'data.seattle.gov',
+      name: 'Dataset',
+      tags: [],
+      columns: [],
+    });
     const ctx = createMockContext({ errors: getDataset.errors });
     const input = getDataset.input.parse({ dataset_id: 'ABCD-1234' });
-    await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    expect(input.dataset_id).toBe('abcd-1234');
+    await getDataset.handler(input, ctx);
+    expect(mockGetDataset).toHaveBeenCalledWith('data.seattle.gov', 'abcd-1234', ctx);
   });
 
   it('queryDataset rejects ID with special characters', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    const input = queryDataset.input.parse({ dataset_id: 'abcd_1234' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    await expectRejectedAtInput(queryDataset, 'abcd_1234');
   });
 
   it('queryDataset rejects an empty string as dataset ID', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    const input = queryDataset.input.parse({ dataset_id: '' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    await expectRejectedAtInput(queryDataset, '');
   });
 
   it('queryDataset rejects path traversal in dataset ID', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    const input = queryDataset.input.parse({ dataset_id: '../etc/passwd' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    await expectRejectedAtInput(queryDataset, '../etc/passwd');
   });
 
   it('getDataset rejects path traversal in dataset ID', async () => {
-    const ctx = createMockContext({ errors: getDataset.errors });
-    const input = getDataset.input.parse({ dataset_id: '../../passwd' });
-    await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    await expectRejectedAtInput(getDataset, '../../passwd');
   });
 
   it('queryDataset rejects null bytes in dataset ID', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    const input = queryDataset.input.parse({ dataset_id: 'abcd\x001234' });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    await expectRejectedAtInput(queryDataset, 'abcd\x001234');
   });
 
   it('queryDataset rejects too-long dataset ID', async () => {
-    const ctx = createMockContext({ errors: queryDataset.errors });
-    const input = queryDataset.input.parse({
-      dataset_id: 'abcd-1234-extra-garbage',
-    });
-    await expect(queryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    await expectRejectedAtInput(queryDataset, 'abcd-1234-extra-garbage');
   });
 });
 

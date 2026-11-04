@@ -4,7 +4,8 @@
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
 import { datasetResource } from '@/mcp-server/resources/definitions/dataset.resource.js';
 
 vi.mock('@/services/socrata/socrata-service.js', () => ({
@@ -64,24 +65,39 @@ describe('datasetResource', () => {
       });
     });
 
-    it('throws ValidationError for a malformed dataset ID', async () => {
-      const ctx = createMockContext();
-      const params = datasetResource.params!.parse({
-        domain: 'data.seattle.gov',
-        datasetId: 'not-valid',
-      });
-      await expect(datasetResource.handler(params, ctx)).rejects.toMatchObject({
-        message: expect.stringContaining('Invalid dataset ID format'),
-      });
-    });
+    it.each(['not-valid', 'ab-1234'])(
+      'rejects the malformed dataset ID %j at params validation, naming the four-by-four form',
+      (datasetId) => {
+        const parsed = datasetResource.params!.safeParse({ domain: 'data.seattle.gov', datasetId });
 
-    it('throws ValidationError for dataset ID with wrong length segments', async () => {
+        expect(parsed.success).toBe(false);
+        expect(parsed.error?.issues).toEqual([
+          expect.objectContaining({
+            path: ['datasetId'],
+            message: expect.stringContaining('four-by-four'),
+          }),
+        ]);
+      },
+    );
+
+    it('fetches an uppercase dataset ID as its lowercase form', async () => {
       const ctx = createMockContext();
+      mockGetDataset.mockResolvedValue({
+        datasetId: 'kzjm-xkqj',
+        domain: 'data.seattle.gov',
+        name: 'Seattle 911 Incidents',
+        tags: [],
+        columns: [],
+      });
+
       const params = datasetResource.params!.parse({
         domain: 'data.seattle.gov',
-        datasetId: 'ab-1234',
+        datasetId: 'KZJM-XKQJ',
       });
-      await expect(datasetResource.handler(params, ctx)).rejects.toThrow();
+      const result = await datasetResource.handler(params, ctx);
+
+      expect(mockGetDataset).toHaveBeenCalledWith('data.seattle.gov', 'kzjm-xkqj', ctx);
+      expect(result.dataset_id).toBe('kzjm-xkqj');
     });
 
     it('returns whatever dataset the service returned, as socrata_get_dataset does — the not-this-dataset check lives in getDataset', async () => {
@@ -195,6 +211,44 @@ describe('datasetResource', () => {
         datasetId: 'dddd-4444',
       });
       await expect(datasetResource.handler(params, ctx)).rejects.toThrow('Network timeout');
+    });
+  });
+
+  describe('asset_type from the views response, through the real service (#68)', () => {
+    beforeEach(async () => {
+      const { SocrataService } = await vi.importActual<
+        typeof import('@/services/socrata/socrata-service.js')
+      >('@/services/socrata/socrata-service.js');
+      (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(new SocrataService());
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it.each([
+      ['a7mk-8suc', { assetType: 'map' }, 'map'],
+      ['t6tk-mr48', { assetType: 'dataset' }, 'dataset'],
+      ['t6tk-mr48', {}, undefined],
+    ])('reads %s with views fields %j as asset_type %s', async (datasetId, extra, assetType) => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+        Promise.resolve(Response.json({ id: datasetId, name: 'NJ asset', columns: [], ...extra })),
+      );
+
+      const params = datasetResource.params!.parse({ domain: 'data.nj.gov', datasetId });
+      const result = datasetResource.output!.parse(
+        await datasetResource.handler(params, createMockContext()),
+      );
+
+      if (assetType) expect(result.asset_type).toBe(assetType);
+      else expect(result).not.toHaveProperty('asset_type');
+      expect(result).toMatchObject({ dataset_id: datasetId, domain: 'data.nj.gov', columns: [] });
+    });
+
+    it('describes asset_type with the shared catalog asset-type text', () => {
+      expect(datasetResource.output!.shape.asset_type.description).toBe(
+        AssetTypeSchema.description,
+      );
     });
   });
 

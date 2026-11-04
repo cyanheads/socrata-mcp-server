@@ -3,9 +3,11 @@
  * @module tests/tools/get-dataset.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
 import { getDataset } from '@/mcp-server/tools/definitions/get-dataset.tool.js';
+import { contentText } from './content-text.js';
 
 vi.mock('@/services/socrata/socrata-service.js', () => ({
   getSocrataService: vi.fn(),
@@ -26,13 +28,16 @@ beforeEach(() => {
 });
 
 describe('getDataset', () => {
-  it('throws invalid_id for malformed dataset ID', async () => {
-    const ctx = createMockContext({ errors: getDataset.errors });
+  it('rejects a malformed dataset ID at input validation, naming the four-by-four form', () => {
+    const parsed = getDataset.input.safeParse({ dataset_id: 'not-valid-id' });
 
-    const input = getDataset.input.parse({ dataset_id: 'not-valid-id' });
-    await expect(getDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
-    });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ['dataset_id'],
+        message: expect.stringContaining('four-by-four'),
+      }),
+    ]);
   });
 
   it('returns full dataset metadata for valid ID', async () => {
@@ -169,5 +174,64 @@ describe('getDataset', () => {
     expect(text).toContain('data.seattle.gov');
     expect(text).toContain('incident_type');
     expect(text).toContain('Text');
+  });
+});
+
+describe('getDataset asset_type from the views response, through the real service (#68)', () => {
+  beforeEach(async () => {
+    const { SocrataService } = await vi.importActual<
+      typeof import('@/services/socrata/socrata-service.js')
+    >('@/services/socrata/socrata-service.js');
+    (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(new SocrataService());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Answer the views request with live-shaped metadata plus `extra`. */
+  function serveViews(id: string, extra: Record<string, unknown>) {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(Response.json({ id, name: 'NJ asset', columns: [], ...extra })),
+    );
+  }
+
+  it.each([
+    ['a7mk-8suc', 'map'],
+    ['t6tk-mr48', 'dataset'],
+  ])('reports %s as %s on both surfaces', async (datasetId, assetType) => {
+    serveViews(datasetId, { assetType });
+
+    const result = await runToolContract(getDataset, {
+      domain: 'data.nj.gov',
+      dataset_id: datasetId,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as { asset_type?: string }).asset_type).toBe(assetType);
+    expect(contentText(result)).toContain(
+      `**ID:** ${datasetId} | **Domain:** data.nj.gov | **Type:** ${assetType}\n`,
+    );
+  });
+
+  it('omits asset_type and the Type label when the views response carries none', async () => {
+    serveViews('a7mk-8suc', {});
+
+    const result = await runToolContract(getDataset, {
+      domain: 'data.nj.gov',
+      dataset_id: 'a7mk-8suc',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).not.toHaveProperty('asset_type');
+    expect(contentText(result)).toContain('**ID:** a7mk-8suc | **Domain:** data.nj.gov\n');
+    expect(contentText(result)).not.toContain('**Type:**');
+  });
+
+  it('describes asset_type with the shared catalog asset-type text', () => {
+    expect(getDataset.output.shape.asset_type.description).toBe(AssetTypeSchema.description);
+    expect(AssetTypeSchema.description).toContain(
+      'Only dataset and filter answer socrata_query_dataset with rows',
+    );
   });
 });

@@ -14,12 +14,18 @@ import {
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { DatasetIdSchema } from '@/mcp-server/dataset-id-schema.js';
+import { cappedLimit } from '@/mcp-server/tools/capped-limit.js';
 import { codeEcho } from '@/mcp-server/tools/code-echo.js';
-import { escapeTableCell, fencedJson, inlineUpstream } from '@/mcp-server/tools/upstream-text.js';
+import {
+  escapeTableCell,
+  fencedJson,
+  inlineUpstream,
+  tableCell,
+} from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 import type { QueryResult } from '@/services/socrata/types.js';
-import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 /**
  * Hard cap on rows staged onto a DataCanvas per spill. The inline response stays
@@ -34,12 +40,9 @@ const CANVAS_SPILL_MAX_ROWS = 50_000;
 /** Rows one call returns inline, bounding the response size. */
 const QUERY_LIMIT_CAP = 5_000;
 
-/** SOCRATA_CLAMP_LIMITS, read at import: it sets the `limit` maximum the schema advertises. */
-const { clampLimits } = getServerConfig();
-
 /** When a spill fires, as both `limit` describes state it. */
 const LIMIT_SPILL =
-  'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page.';
+  'When the server has a canvas and more rows match past a full page, up to 50,000 matching rows are staged on it whatever the limit — pass a small limit (e.g. 10) to stage a large match without a large inline page, or stage false to return the page without staging.';
 
 /**
  * Whether the canvas registers `name` as a table: its identifier check, which
@@ -117,11 +120,26 @@ function soqlRecoveryHint(socrataCode: unknown, column: unknown): string | undef
   }
 }
 
+/**
+ * Recovery hint for a `not_tabular` asset the catalog lists as built on other
+ * assets (a map or chart over its source table): every parent, in catalog
+ * order, and the portal to query it on. Undefined when the error names no
+ * parent — the caller falls back to the declared recovery.
+ */
+function parentsHint(datasetId: string, data: Record<string, unknown>): string | undefined {
+  const { parent_dataset_ids: parents, asset_type: assetType, host } = data;
+  if (!Array.isArray(parents) || parents.length === 0) return;
+  const type = typeof assetType === 'string' ? inlineUpstream(assetType) : undefined;
+  const asset = type ? `is ${/^[aeiou]/i.test(type) ? 'an' : 'a'} ${type}` : 'is';
+  const target = parents.length === 1 ? 'that dataset_id' : 'one of those dataset_ids';
+  return `${datasetId} ${asset} built on ${parents.join(', ')}; query ${target} on ${String(host)}.`;
+}
+
 export const queryDataset = tool('socrata_query_dataset', {
   title: 'Query Dataset',
   description:
-    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When the server has a canvas and more rows match past a full page, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query.',
-  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    'Execute a SoQL query against any dataset on any Socrata portal. Use the search parameter for quick full-text lookup, or combine select/where/group/having/order for full analytical control. Returns rows plus the assembled SoQL string so you can learn the pattern. Columns are referenced by API field name (field_name from socrata_get_dataset, e.g. cuisine_description), never the display label. All SODA 2.1 row values are strings even for numeric columns — check data_type from socrata_get_dataset to determine correct WHERE quoting: Number columns use bare literals (year=2023), Text columns use single-quoted strings (year=\'2023\'). To enumerate distinct values, use select="col, count(*) as n" with group="col" and order="n DESC". When the server has a canvas and more rows match past a full page, up to 50,000 matching rows spill to a DataCanvas table whatever the limit: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. Pass stage false to return the page alone, without staging.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     domain: z
       .string()
@@ -129,11 +147,9 @@ export const queryDataset = tool('socrata_query_dataset', {
       .describe(
         'Portal the dataset lives on, as a bare hostname (e.g. data.cityofnewyork.us); URL forms like https://data.cityofnewyork.us/ are accepted and reduced to the host. Pass the domain from the same socrata_find_datasets result as dataset_id. Defaults to SOCRATA_DEFAULT_DOMAIN or data.seattle.gov, which is wrong for another portal’s ID.',
       ),
-    dataset_id: z
-      .string()
-      .describe(
-        'Four-by-four dataset ID (e.g. kzjm-xkqj). IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
-      ),
+    dataset_id: DatasetIdSchema.describe(
+      'Four-by-four dataset ID (e.g. kzjm-xkqj). IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
+    ),
     search: z
       .string()
       .optional()
@@ -168,20 +184,18 @@ export const queryDataset = tool('socrata_query_dataset', {
       .describe(
         'SoQL ORDER BY clause over API field names or select aliases, e.g. "total_deaths DESC" or "date ASC".',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(clampLimits ? CANVAS_SPILL_MAX_ROWS : QUERY_LIMIT_CAP)
-      .default(100)
-      .describe(
-        clampLimits
+    limit: cappedLimit({
+      cap: QUERY_LIMIT_CAP,
+      ceiling: CANVAS_SPILL_MAX_ROWS,
+      defaultValue: 100,
+      describe: (clamped) =>
+        clamped
           ? `Max rows to return (1–50,000). One call returns at most 5,000 rows: a larger limit is served as 5,000, with a notice naming the offset that continues when more rows match. Default 100. Use with offset for pagination. ${LIMIT_SPILL}`
           : `Max rows to return (1–5000). Default 100. Use with offset for pagination. ${LIMIT_SPILL}`,
-      ),
+    }),
     offset: z.number().int().min(0).default(0).describe('Row offset for pagination. Default 0.'),
     canvas_id: CanvasIdSchema.optional().describe(
-      'Optional 10-char DataCanvas token from a prior socrata_query_dataset or socrata_dataframe_describe call. Omit on first call to mint a fresh canvas. Large result sets spill here automatically.',
+      'Optional 10-char DataCanvas token from a prior socrata_query_dataset or socrata_dataframe_describe call. Omit on first call to mint a fresh canvas. Large result sets spill here automatically unless stage is false.',
     ),
     // A blank from a form client reads as unset. The name is lowercased before
     // the check, so the advertised pattern admits the mixed-case form.
@@ -203,6 +217,12 @@ export const queryDataset = tool('socrata_query_dataset', {
       )
       .describe(
         'Name for the canvas table a spill stages: letters, digits, and underscores, starting with a letter or underscore, 63 characters at most; lowercased, and not a SQL keyword such as select or order. Defaults to a name derived from dataset_id (ijzp_q8t2_rows). A spill under a name the canvas already holds replaces that table, so give each extract its own name, with the same canvas_id, to keep several on one canvas.',
+      ),
+    stage: z
+      .boolean()
+      .default(true)
+      .describe(
+        'Stage the matching rows on a canvas when more rows match past this page and the server has a canvas. Default true. Pass false to return the page alone, skipping the staging request; canvas_id and table_name then go unused.',
       ),
   }),
   output: z.object({
@@ -250,13 +270,13 @@ export const queryDataset = tool('socrata_query_dataset', {
       .string()
       .optional()
       .describe(
-        'Guidance when the query returned zero rows (review the SoQL or broaden the filter; past offset 0, whether the offset passed the end of the match), or when more rows match past this page: how to page, naming the requested and served limit when a limit above the 5,000-row per-call cap was served as 5,000; the staged table to query when the result spilled, and the earlier table of that name it replaced; or why nothing was staged. Absent otherwise.',
+        'Guidance when the query returned zero rows (review the SoQL or broaden the filter; past offset 0, whether the offset passed the end of the match), or when more rows match past this page: how to page, naming the requested and served limit when a limit above the 5,000-row per-call cap was served as 5,000; the staged table to query when the result spilled, and the earlier table of that name it replaced; or why nothing was staged, naming a canvas_id or table_name that stage false left unused. Absent otherwise.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when more rows match past this page: total_count exceeds offset + row_count, or rows filled the limit and no count was made. Spills to canvas when enabled; table_name names the staged table.',
+        'True when more rows match past this page: total_count exceeds offset + row_count, or rows filled the limit and no count was made. Spills to canvas when enabled and stage is not false; table_name names the staged table.',
       ),
     shown: z.number().optional().describe('Rows returned in this response when capped.'),
     cap: z.number().optional().describe('The row limit that was applied when capped.'),
@@ -273,16 +293,9 @@ export const queryDataset = tool('socrata_query_dataset', {
     {
       reason: 'not_tabular',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SODA returned the non-tabular asset access error.',
+      when: 'The asset has no queryable rows: SODA refused row access to a non-tabular asset (HTTP 403), or answered with no fields, as maps, charts, calendars, and visualizations do. data.asset_type and data.parent_dataset_ids then name the asset type and the tables it is built on, when the catalog lists them.',
       recovery:
         'Find a queryable table with socrata_find_datasets using only: "datasets", then retry with its dataset_id and domain.',
-    },
-    {
-      reason: 'invalid_id',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'Dataset ID does not match the four-by-four pattern.',
-      recovery:
-        'Dataset IDs are always 9 characters like kzjm-xkqj. Obtain from socrata_find_datasets.',
     },
     {
       reason: 'not_found',
@@ -333,13 +346,6 @@ export const queryDataset = tool('socrata_query_dataset', {
   async handler(input, ctx) {
     const domain = input.domain?.trim() ? input.domain.trim() : getServerConfig().defaultDomain;
 
-    if (!DATASET_ID_PATTERN.test(input.dataset_id)) {
-      throw ctx.fail(
-        'invalid_id',
-        `Invalid dataset ID "${input.dataset_id}". Expected pattern like kzjm-xkqj.`,
-      );
-    }
-
     // Served limit: a limit between the cap and the ceiling is served at the cap.
     const limit = Math.min(input.limit, QUERY_LIMIT_CAP);
     ctx.log.info('Querying dataset', {
@@ -376,9 +382,10 @@ export const queryDataset = tool('socrata_query_dataset', {
     } catch (err) {
       // Re-throw service failures that map to declared contract reasons via
       // ctx.fail so a recovery hint reaches the wire. A not_found whose ID the
-      // Discovery catalog places on another portal names that portal, and a
-      // soql_error takes the hint for its upstream code, instead of the static
-      // hint.
+      // Discovery catalog places on another portal names that portal, a
+      // soql_error takes the hint for its upstream code, and a not_tabular
+      // asset the catalog lists as built on other assets names them, instead
+      // of the static hint.
       if (err instanceof McpError) {
         const data = (err.data ?? {}) as Record<string, unknown>;
         const { reason, found_on_domain: foundOn, socrataCode, column } = data;
@@ -396,7 +403,9 @@ export const queryDataset = tool('socrata_query_dataset', {
               ? `${input.dataset_id} is on ${foundOn} — retry with domain "${foundOn}".`
               : reason === 'soql_error'
                 ? soqlRecoveryHint(socrataCode, column)
-                : undefined;
+                : reason === 'not_tabular'
+                  ? parentsHint(input.dataset_id, data)
+                  : undefined;
           throw ctx.fail(
             reason,
             err.message,
@@ -434,14 +443,23 @@ export const queryDataset = tool('socrata_query_dataset', {
       }
     }
 
-    // Stage the match on the DataCanvas when one is available and rows remain past this page.
+    // Stage the match on the DataCanvas when one is available, rows remain past
+    // this page, and the caller did not opt out with stage: false.
     let spill:
       | { canvasId: string; rowCount: number; tableName: string; replacedRowCount?: number }
       | undefined;
-    // Why nothing was staged: a spill that failed, or a caller-named table the call made none of.
+    // Why nothing was staged: a spill that failed, or a caller-named canvas or table the call made none of.
     let notStaged: string | undefined;
     const canvas = getCanvas();
-    if (canvas && truncated) {
+    // The canvas inputs stage: false leaves unused. Without a canvas, stage changes nothing.
+    const unused =
+      canvas && !input.stage
+        ? [
+            ...(input.canvas_id ? [`canvas_id ${input.canvas_id}`] : []),
+            ...(input.table_name ? [`table_name "${input.table_name}"`] : []),
+          ]
+        : [];
+    if (canvas && truncated && input.stage) {
       try {
         const instance = await canvas.acquire(input.canvas_id, ctx);
         const tableName =
@@ -500,6 +518,8 @@ export const queryDataset = tool('socrata_query_dataset', {
         notStaged = notStagedNotice(err);
         ctx.log.warning('DataCanvas spillover failed', { error: String(err) });
       }
+    } else if (unused.length > 0 && rowCount > 0) {
+      notStaged = `Nothing was staged: stage is false, so ${unused.join(' and ')} went unused.`;
     } else if (input.table_name && rowCount > 0) {
       // A smaller limit makes the page stop short of the match, which stages it.
       notStaged = canvas
@@ -598,12 +618,7 @@ export const queryDataset = tool('socrata_query_dataset', {
       lines.push(`| ${cols.map((c) => escapeTableCell(c)).join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
       for (const row of result.rows) {
-        const cells = cols.map((c) => {
-          const v = row[c];
-          const s = v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
-          return escapeTableCell(s);
-        });
-        lines.push(`| ${cells.join(' | ')} |`);
+        lines.push(`| ${cols.map((c) => tableCell(row[c])).join(' | ')} |`);
       }
     } else {
       // Fall back to fenced JSON for wide datasets — the fence is sized past any

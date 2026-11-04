@@ -5,9 +5,9 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
+import { DatasetIdSchema } from '@/mcp-server/dataset-id-schema.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
-import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}', {
   name: 'socrata-dataset',
@@ -21,16 +21,15 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
       .describe(
         'Portal the dataset lives on, as a bare hostname (e.g. data.seattle.gov); case is normalized.',
       ),
-    datasetId: z
-      .string()
-      .describe(
-        'Four-by-four dataset ID (e.g. kzjm-xkqj). IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
-      ),
+    datasetId: DatasetIdSchema.describe(
+      'Four-by-four dataset ID (e.g. kzjm-xkqj). IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
+    ),
   }),
   output: z.object({
     dataset_id: z.string().describe('Four-by-four Socrata dataset ID.'),
     domain: z.string().describe('Portal domain hosting the dataset.'),
     name: z.string().describe('Dataset display name.'),
+    asset_type: AssetTypeSchema,
     description: z.string().optional().describe('Dataset description when available.'),
     category: z.string().optional().describe('Dataset category when available.'),
     tags: z.array(z.string()).describe('Dataset tags.'),
@@ -62,13 +61,6 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
   }),
 
   async handler(params, ctx) {
-    if (!DATASET_ID_PATTERN.test(params.datasetId)) {
-      throw validationError(
-        `Invalid dataset ID format: "${params.datasetId}". Expected pattern like kzjm-xkqj.`,
-        { datasetId: params.datasetId },
-      );
-    }
-
     ctx.log.debug('Fetching dataset resource', {
       domain: params.domain,
       datasetId: params.datasetId,
@@ -83,6 +75,7 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
       dataset_id: meta.datasetId,
       domain: meta.domain,
       name: meta.name,
+      ...(meta.assetType ? { asset_type: meta.assetType } : {}),
       ...(meta.description ? { description: meta.description } : {}),
       ...(meta.category ? { category: meta.category } : {}),
       tags: meta.tags,

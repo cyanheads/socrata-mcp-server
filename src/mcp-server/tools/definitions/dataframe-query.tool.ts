@@ -7,9 +7,9 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema, type DataCanvas, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
+import { cappedLimit } from '@/mcp-server/tools/capped-limit.js';
 import { codeEcho } from '@/mcp-server/tools/code-echo.js';
-import { escapeTableCell, fencedJson } from '@/mcp-server/tools/upstream-text.js';
+import { escapeTableCell, fencedJson, tableCell } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 /**
@@ -24,9 +24,6 @@ const QUERY_LIMIT_CAP = 10_000;
  * socrata_query_dataset stages into one table.
  */
 const QUERY_LIMIT_CEILING = 50_000;
-
-/** SOCRATA_CLAMP_LIMITS, read at import: it sets the `limit` maximum the schema advertises. */
-const { clampLimits } = getServerConfig();
 
 /**
  * How to read past a page held to the per-call cap. The tool takes no offset,
@@ -76,7 +73,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
   title: 'Query DataCanvas Table',
   description:
     'Run SELECT-only SQL against a DataCanvas table populated by socrata_query_dataset. Columns SODA types as number (including aggregate aliases like count(*) as n) are staged as DOUBLE, so numeric comparisons work without a cast (year > 2020, amount < 500). Text and timestamp columns stay VARCHAR — compare times with CAST(date AS TIMESTAMP). Works when the server has a DataCanvas. Use socrata_dataframe_describe to see registered tables and their schemas.',
-  annotations: { readOnlyHint: true, idempotentHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
       'Canvas ID returned from socrata_query_dataset or socrata_dataframe_describe.',
@@ -86,17 +83,15 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       .describe(
         'SELECT-only SQL to run against registered canvas tables. DDL, DML, and file-reading functions are rejected. Use table names from socrata_dataframe_describe.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(clampLimits ? QUERY_LIMIT_CEILING : QUERY_LIMIT_CAP)
-      .default(1000)
-      .describe(
-        clampLimits
+    limit: cappedLimit({
+      cap: QUERY_LIMIT_CAP,
+      ceiling: QUERY_LIMIT_CEILING,
+      defaultValue: 1000,
+      describe: (clamped) =>
+        clamped
           ? 'Max rows to return (1–50,000). One call returns at most 10,000 rows: a larger limit is served as 10,000, with a notice naming how to page through the rest when more rows match. Default 1000.'
           : 'Max rows to return (1–10000). Default 1000.',
-      ),
+    }),
   }),
   output: z.object({
     rows: z
@@ -253,10 +248,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
       lines.push(`| ${cols.map((c) => escapeTableCell(c)).join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
       for (const row of result.rows) {
-        const cells = cols.map((c) =>
-          escapeTableCell(String((row as Record<string, unknown>)[c] ?? '')),
-        );
-        lines.push(`| ${cells.join(' | ')} |`);
+        lines.push(`| ${cols.map((c) => tableCell(row[c])).join(' | ')} |`);
       }
     } else {
       for (const row of result.rows) {

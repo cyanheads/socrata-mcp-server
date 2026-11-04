@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-10-31 02:01:55
+Generated on: 2026-11-04 04:07:08
 
 ```text
 socrata-mcp-server/
@@ -158,17 +158,20 @@ socrata-mcp-server/
 │   │   │   └── definitions/
 │   │   │       ├── dataset.resource.ts
 │   │   │       └── portals.resource.ts
-│   │   └── tools/
-│   │       ├── definitions/
-│   │       │   ├── dataframe-describe.tool.ts
-│   │       │   ├── dataframe-drop.tool.ts
-│   │       │   ├── dataframe-query.tool.ts
-│   │       │   ├── find-datasets.tool.ts
-│   │       │   ├── get-dataset.tool.ts
-│   │       │   ├── list-portals.tool.ts
-│   │       │   └── query-dataset.tool.ts
-│   │       ├── code-echo.ts
-│   │       └── upstream-text.ts
+│   │   ├── tools/
+│   │   │   ├── definitions/
+│   │   │   │   ├── dataframe-describe.tool.ts
+│   │   │   │   ├── dataframe-drop.tool.ts
+│   │   │   │   ├── dataframe-query.tool.ts
+│   │   │   │   ├── find-datasets.tool.ts
+│   │   │   │   ├── get-dataset.tool.ts
+│   │   │   │   ├── list-portals.tool.ts
+│   │   │   │   └── query-dataset.tool.ts
+│   │   │   ├── capped-limit.ts
+│   │   │   ├── code-echo.ts
+│   │   │   └── upstream-text.ts
+│   │   ├── asset-type-schema.ts
+│   │   └── dataset-id-schema.ts
 │   ├── services/
 │   │   ├── socrata/
 │   │   │   ├── socrata-service.ts
@@ -177,7 +180,8 @@ socrata-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── config/
-│   │   └── server-config.test.ts
+│   │   ├── server-config.test.ts
+│   │   └── startup.test.ts
 │   ├── mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
@@ -193,13 +197,16 @@ socrata-mcp-server/
 │   ├── services/
 │   │   └── socrata-service.test.ts
 │   └── tools/
+│       ├── annotations.test.ts
 │       ├── content-text.ts
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-drop.flag.test.ts
 │       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
+│       ├── dataset-id-input.test.ts
 │       ├── find-datasets.tool.test.ts
 │       ├── get-dataset.tool.test.ts
+│       ├── limit-schema.test.ts
 │       ├── list-portals.tool.test.ts
 │       ├── query-dataset.canvas.test.ts
 │       ├── query-dataset.tool.test.ts

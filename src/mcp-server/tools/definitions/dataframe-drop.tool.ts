@@ -8,7 +8,7 @@
 import { disabledTool, tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema, type DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
+import { dataframeDropFlag } from '@/config/server-config.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 const DroppedTableSchema = z
@@ -169,7 +169,7 @@ const dataframeDropDefinition = tool('socrata_dataframe_drop', {
   },
 });
 
-export const dataframeDrop = getServerConfig().dataframeDropEnabled
+export const dataframeDrop = dataframeDropFlag()
   ? dataframeDropDefinition
   : disabledTool(dataframeDropDefinition, {
       reason: 'Dropping DataCanvas data is turned off in this deployment.',

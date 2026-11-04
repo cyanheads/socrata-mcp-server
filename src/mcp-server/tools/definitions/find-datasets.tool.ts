@@ -6,7 +6,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
-import { getServerConfig } from '@/config/server-config.js';
+import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
+import { cappedLimit } from '@/mcp-server/tools/capped-limit.js';
 import { inlineUpstream, upstreamBlockquote } from '@/mcp-server/tools/upstream-text.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 
@@ -19,9 +20,6 @@ const FIND_LIMIT_CAP = 100;
  * counting there. It is also the hard ceiling on `limit` while clamping is on.
  */
 const DISCOVERY_RESULT_WINDOW = 10_000;
-
-/** SOCRATA_CLAMP_LIMITS, read at import: it sets the `limit` maximum the schema advertises. */
-const { clampLimits } = getServerConfig();
 
 /**
  * The notice for a page served below the requested `limit`: by the per-call
@@ -40,8 +38,14 @@ function limitNotice(
   ];
   const head = `The requested limit ${requested} was served as ${served}: ${causes.join(', and ')}.`;
   return windowEnd
-    ? `${head} The Discovery catalog serves only the first 10,000 matches of a search, so no later page exists; narrow the search with domain, categories, tags, query, or only to reach the rest.`
+    ? `${head} The Discovery catalog serves only the first 10,000 matches of a search, so no later page exists; narrow the search with domain, query, or only, or with categories or tags alongside domain, to reach the rest.`
     : `${head} Continue with offset ${nextOffset}.`;
+}
+
+/** The entries of a multi-value filter that are not blank; undefined when none remain. */
+function nonBlank(values: string[] | undefined): string[] | undefined {
+  const kept = values?.filter((v) => v.trim());
+  return kept?.length ? kept : undefined;
 }
 
 const DatasetResultSchema = z
@@ -53,6 +57,13 @@ const DatasetResultSchema = z
       ),
     domain: z.string().describe('Portal domain hosting this dataset (e.g. data.seattle.gov).'),
     name: z.string().describe('Dataset display name.'),
+    asset_type: AssetTypeSchema,
+    parent_dataset_ids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'IDs, on the same domain, of the assets this one is built from (Discovery parent_fxf): the table a filter, map, chart, or calendar reads, or every asset a story embeds, charts and maps included. Not every parent is public. Absent when the catalog lists none.',
+      ),
     description: z.string().optional().describe('Dataset description when available.'),
     category: z.string().optional().describe('Domain category when available.'),
     tags: z.array(z.string()).describe('Associated tags.'),
@@ -86,19 +97,19 @@ export const findDatasets = tool('socrata_find_datasets', {
       .string()
       .optional()
       .describe(
-        'Scope search to a single portal by bare hostname (e.g. data.seattle.gov, data.cityofnewyork.us); URL forms like https://data.seattle.gov/ are accepted and reduced to the host. Omit to search all portals.',
+        'Scope search to a single portal by bare hostname (e.g. data.seattle.gov, data.cityofnewyork.us); URL forms like https://data.seattle.gov/ are accepted and reduced to the host. Omit to search all portals. Required with categories or tags.',
       ),
     categories: z
       .array(z.string())
       .optional()
       .describe(
-        'Filter by domain categories (e.g. ["Public Safety", "Transportation"]). Multiple values are ORed: a dataset in any listed category matches.',
+        'Filter by the portal\'s own categories (e.g. ["Public Safety", "Transportation"]). Requires domain: each portal assigns its own categories. Multiple values are ORed: a dataset in any listed category matches. Across portals, search with query instead.',
       ),
     tags: z
       .array(z.string())
       .optional()
       .describe(
-        'Filter by tags (e.g. ["covid19", "permits"]). Multiple values are ORed: a dataset carrying any listed tag matches.',
+        'Filter by the portal\'s own tags (e.g. ["covid19", "permits"]). Requires domain: each portal assigns its own tags. Multiple values are ORed: a dataset carrying any listed tag matches. Across portals, search with query instead.',
       ),
     only: z
       .enum(['datasets', 'maps', 'files', 'calendars', 'stories'])
@@ -112,17 +123,15 @@ export const findDatasets = tool('socrata_find_datasets', {
       .describe(
         'Sort order. Defaults to relevance. Use updated_at to surface recently-refreshed datasets.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(clampLimits ? DISCOVERY_RESULT_WINDOW : FIND_LIMIT_CAP)
-      .default(10)
-      .describe(
-        clampLimits
+    limit: cappedLimit({
+      cap: FIND_LIMIT_CAP,
+      ceiling: DISCOVERY_RESULT_WINDOW,
+      defaultValue: 10,
+      describe: (clamped) =>
+        clamped
           ? 'Number of results to return (1–10,000). One call returns at most 100 results: a larger limit is served as 100, with a notice naming the offset that continues. Default 10.'
           : 'Number of results to return (1–100). Default 10.',
-      ),
+    }),
     offset: z
       .number()
       .int()
@@ -161,11 +170,18 @@ export const findDatasets = tool('socrata_find_datasets', {
 
   errors: [
     {
+      reason: 'domain_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "categories or tags was sent without domain: both match one portal's own vocabulary, and without domain the catalog matches them against a Socrata-wide taxonomy that portal results do not report.",
+      recovery:
+        'Pass domain to filter one portal by its own categories and tags, or drop categories and tags and use query for a keyword search across every portal.',
+    },
+    {
       reason: 'result_window_exceeded',
       code: JsonRpcErrorCode.ValidationError,
       when: 'offset is 10,000 or more: the Discovery catalog serves only the first 10,000 matches of a search.',
       recovery:
-        'Narrow the search with domain, categories, tags, query, or only so the matches you need fall within the first 10,000, then page with an offset below 10,000.',
+        'Narrow the search with domain, query, or only, or with categories or tags alongside domain, so the matches you need fall within the first 10,000, then page with an offset below 10,000.',
     },
     {
       reason: 'rate_limited',
@@ -179,7 +195,7 @@ export const findDatasets = tool('socrata_find_datasets', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The Discovery catalog does not index the domain ("Domain not found").',
       recovery:
-        'The domain is not a Socrata portal the catalog knows. Pass a bare portal hostname such as data.cityofnewyork.us, pick one from socrata_list_portals, or omit domain to search every indexed portal.',
+        'The domain is not a Socrata portal the catalog knows. Pass a bare portal hostname such as data.cityofnewyork.us, pick one from socrata_list_portals, or omit domain to search every indexed portal, with query in place of any categories or tags, which need domain.',
     },
     {
       reason: 'invalid_domain',
@@ -195,7 +211,7 @@ export const findDatasets = tool('socrata_find_datasets', {
       retryable: true,
       thrownBy: 'service',
       recovery:
-        'Retry with a narrower search: set domain, categories, tags, or a more specific query.',
+        'Retry with a narrower search: set domain, add categories or tags alongside domain, or use a more specific query.',
     },
   ],
 
@@ -207,6 +223,22 @@ export const findDatasets = tool('socrata_find_datasets', {
       offset: input.offset,
     });
 
+    const query = input.query?.trim() ? input.query : undefined;
+    const domain = input.domain?.trim() ? input.domain : undefined;
+    // A blank entry filters nothing (Discovery ignores an empty `tags=`), so it
+    // reads as unset, as a blank query or domain does.
+    const categories = nonBlank(input.categories);
+    const tags = nonBlank(input.tags);
+    // Discovery matches categories and tags against the portal's own vocabulary
+    // only under search_context, which needs a domain; without one it reads a
+    // Socrata-wide taxonomy the results never report.
+    if (!domain && (categories || tags)) {
+      const named = categories && tags ? 'categories and tags' : categories ? 'categories' : 'tags';
+      throw ctx.fail(
+        'domain_required',
+        `${named} need domain: categories and tags match one portal's own vocabulary, and without domain the catalog matches them against a different, Socrata-wide taxonomy.`,
+      );
+    }
     if (input.offset >= DISCOVERY_RESULT_WINDOW) {
       throw ctx.fail(
         'result_window_exceeded',
@@ -219,10 +251,6 @@ export const findDatasets = tool('socrata_find_datasets', {
     const windowEnd = input.offset + limit === DISCOVERY_RESULT_WINDOW;
 
     const svc = getSocrataService();
-    const query = input.query?.trim() ? input.query : undefined;
-    const domain = input.domain?.trim() ? input.domain : undefined;
-    const categories = input.categories?.length ? input.categories : undefined;
-    const tags = input.tags?.length ? input.tags : undefined;
     let found: Awaited<ReturnType<typeof svc.findDatasets>>;
     try {
       found = await svc.findDatasets(
@@ -275,13 +303,22 @@ export const findDatasets = tool('socrata_find_datasets', {
       );
     } else if (results.length === 0) {
       const filtersApplied: string[] = [];
-      if (input.query) filtersApplied.push(`query="${input.query}"`);
-      if (input.domain) filtersApplied.push(`domain=${input.domain}`);
-      if (input.categories?.length) filtersApplied.push(`categories=${input.categories.join(',')}`);
-      if (input.tags?.length) filtersApplied.push(`tags=${input.tags.join(',')}`);
+      if (query) filtersApplied.push(`query="${query}"`);
+      if (domain) filtersApplied.push(`domain=${domain}`);
+      if (categories) filtersApplied.push(`categories=${categories.join(',')}`);
+      if (tags) filtersApplied.push(`tags=${tags.join(',')}`);
+      // Only levers this call can pull: category and tag filters ride with a
+      // domain, so dropping the domain drops them too.
+      const filtered = Boolean(categories || tags);
+      const levers = ['Try broader search terms'];
+      if (filtered) levers.push('remove category/tag filters');
+      if (domain)
+        levers.push(`omit domain${filtered ? ' and those filters' : ''} to search all portals`);
+      const advice =
+        levers.length === 1 ? levers[0] : `${levers.slice(0, -1).join(', ')}, or ${levers.at(-1)}`;
 
       notices.push(
-        `No datasets matched${filtersApplied.length ? ` with ${escapeMarkdownInline(filtersApplied.join(', '))}` : ''}. Try broader search terms, remove category/tag filters, or omit domain to search all portals.`,
+        `No datasets matched${filtersApplied.length ? ` with ${escapeMarkdownInline(filtersApplied.join(', '))}` : ''}. ${advice}.`,
       );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -291,6 +328,8 @@ export const findDatasets = tool('socrata_find_datasets', {
         dataset_id: r.datasetId,
         domain: r.domain,
         name: r.name,
+        ...(r.assetType ? { asset_type: r.assetType } : {}),
+        ...(r.parentDatasetIds ? { parent_dataset_ids: r.parentDatasetIds } : {}),
         ...(r.description ? { description: r.description } : {}),
         ...(r.category ? { category: r.category } : {}),
         tags: r.tags,
@@ -315,7 +354,13 @@ export const findDatasets = tool('socrata_find_datasets', {
       // Dataset names and descriptions are upstream-controlled — render names
       // quoted on a single line and descriptions as labeled blockquotes.
       lines.push(`### "${escapeMarkdownInline(inlineUpstream(ds.name))}"`);
-      lines.push(`**ID:** ${ds.dataset_id} | **Domain:** ${ds.domain}`);
+      const type =
+        ds.asset_type != null ? ` | **Type:** ${escapeMarkdownInline(ds.asset_type)}` : '';
+      lines.push(`**ID:** ${ds.dataset_id} | **Domain:** ${ds.domain}${type}`);
+      // Every parent structuredContent carries — a story lists up to 21.
+      if (ds.parent_dataset_ids != null) {
+        lines.push(`**Built on:** ${ds.parent_dataset_ids.join(', ')}`);
+      }
       if (ds.category != null) lines.push(`**Category:** ${escapeMarkdownInline(ds.category)}`);
       if (ds.tags.length) lines.push(`**Tags:** ${ds.tags.map(escapeMarkdownInline).join(', ')}`);
       if (ds.description != null) {

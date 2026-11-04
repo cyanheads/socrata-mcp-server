@@ -43,10 +43,11 @@ const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
 const DISCOVERY_HOST = new URL(DISCOVERY_BASE).host;
 
 /**
- * Budget for the best-effort Discovery `?ids=` lookup on a dataset not_found.
- * One attempt, outside `withRetry` — the lookup only runs on a request that has
- * already failed (live: 0.33–0.51 s per call), so it must never add seconds.
- * The call's deadline caps it further.
+ * Budget for the best-effort Discovery `?ids=` lookup on a dataset not_found
+ * or a row answer with no fields (not_tabular). One attempt, outside
+ * `withRetry` — the lookup only runs on a request that has already failed
+ * (live: 0.33–0.51 s per call), so it must never add seconds. The call's
+ * deadline caps it further.
  */
 const DISCOVERY_LOOKUP_TIMEOUT_MS = 2_500;
 
@@ -230,6 +231,12 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');
 }
 
+/** The fields a `/resource` response returned, from its `X-SODA2-Fields` header; undefined when missing or not a JSON string array. */
+function sodaFields(headers: Headers): string[] | undefined {
+  const fields = parseJsonBody(headers.get('X-SODA2-Fields') ?? '');
+  return isStringArray(fields) ? fields : undefined;
+}
+
 /**
  * The SODA type of each field a `/resource` response returned, from its
  * `X-SODA2-Fields` / `X-SODA2-Types` headers (JSON string arrays, index-aligned).
@@ -237,10 +244,36 @@ function isStringArray(value: unknown): value is string[] {
  * differ in length — the pairing is then unknowable.
  */
 function parseFieldTypes(headers: Headers): Map<string, string> | undefined {
-  const fields = parseJsonBody(headers.get('X-SODA2-Fields') ?? '');
+  const fields = sodaFields(headers);
   const types = parseJsonBody(headers.get('X-SODA2-Types') ?? '');
-  if (!isStringArray(fields) || !isStringArray(types) || fields.length !== types.length) return;
+  if (!fields || !isStringArray(types) || fields.length !== types.length) return;
   return new Map(fields.map((field, i) => [field, types[i] as string]));
+}
+
+/** A string with non-whitespace content, else undefined — an optional upstream label. */
+function nonBlankString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+/**
+ * The dataset IDs in a Discovery `parent_fxf` list, in its order; an entry
+ * that is not a four-by-four ID is skipped. Undefined when none remain, so the
+ * field is omitted rather than reported empty.
+ */
+function catalogParentIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return;
+  const ids = value.filter((v): v is string => typeof v === 'string' && DATASET_ID_PATTERN.test(v));
+  return ids.length > 0 ? ids : undefined;
+}
+
+/** What one Discovery `?ids=` record says about an asset; each field absent when the record lacks it. */
+interface CatalogRecord {
+  /** `resource.type`: dataset, filter, map, chart, … */
+  assetType?: string;
+  /** The portal that catalogs the asset (`metadata.domain`). */
+  domain?: string;
+  /** `resource.parent_fxf`: the assets this one is built from. */
+  parentDatasetIds?: string[];
 }
 
 /**
@@ -739,7 +772,7 @@ export class SocrataService {
     } catch (err) {
       ctx.signal.throwIfAborted();
       if (!(err instanceof McpError) || err.data?.reason !== 'not_found') throw err;
-      const foundOn = await this.lookupDatasetDomain(datasetId, ctx);
+      const foundOn = (await this.lookupCatalogRecord(datasetId, ctx))?.domain;
       ctx.signal.throwIfAborted();
       const refused = err.data.status === 403;
       const onThisPortal = foundOn !== undefined && sameCatalogPortal(foundOn, domain);
@@ -803,12 +836,16 @@ export class SocrataService {
   }
 
   /**
-   * Best-effort Discovery `?ids=` lookup of the portal that catalogs a dataset
-   * ID. One attempt under its own short timeout; any failure (timeout, 429,
-   * 5xx, malformed body, network) resolves `undefined` so the caller's original
-   * not_found stands unchanged.
+   * Best-effort Discovery `?ids=` lookup of the catalog record for a dataset
+   * ID: the portal that catalogs it, its asset type, and the assets it is
+   * built from. One attempt under its own short timeout; any failure (timeout,
+   * 429, 5xx, malformed body, network) resolves `undefined` so the caller's
+   * original failure stands unchanged. The caller's cancellation is rethrown.
    */
-  private async lookupDatasetDomain(datasetId: string, ctx: Context): Promise<string | undefined> {
+  private async lookupCatalogRecord(
+    datasetId: string,
+    ctx: Context,
+  ): Promise<CatalogRecord | undefined> {
     const boundMs = Math.min(DISCOVERY_LOOKUP_TIMEOUT_MS, this.remainingMs(ctx));
     if (boundMs === 0) return;
     // A manual timer rather than AbortSignal.timeout: fake timers drive it in tests.
@@ -822,10 +859,20 @@ export class SocrataService {
       });
       ctx.signal.throwIfAborted();
       if (!response.ok) return;
-      const raw = (await response.json()) as { results?: { metadata?: { domain?: unknown } }[] };
+      const raw = (await response.json()) as {
+        results?: { resource?: Record<string, unknown>; metadata?: { domain?: unknown } }[];
+      };
       ctx.signal.throwIfAborted();
-      const domain = raw.results?.[0]?.metadata?.domain;
-      return typeof domain === 'string' && domain ? domain : undefined;
+      const record = raw.results?.[0];
+      if (!record) return;
+      const domain = nonBlankString(record.metadata?.domain);
+      const assetType = nonBlankString(record.resource?.type);
+      const parentDatasetIds = catalogParentIds(record.resource?.parent_fxf);
+      return {
+        ...(domain ? { domain } : {}),
+        ...(assetType ? { assetType } : {}),
+        ...(parentDatasetIds ? { parentDatasetIds } : {}),
+      };
     } catch (err) {
       ctx.signal.throwIfAborted();
       ctx.log.debug('Discovery dataset-ID lookup failed', { datasetId, error: String(err) });
@@ -833,6 +880,32 @@ export class SocrataService {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * The not_tabular failure of a 2xx row answer with no fields — a map,
+   * chart, calendar, or visualization. One {@link lookupCatalogRecord} adds
+   * the asset type and the IDs of the tables it is built from, when the
+   * catalog lists them; without them the failure stands as it is.
+   */
+  private async fieldlessAssetError(
+    host: string,
+    datasetId: string,
+    ctx: Context,
+  ): Promise<McpError> {
+    const record = await this.lookupCatalogRecord(datasetId, ctx);
+    ctx.signal.throwIfAborted();
+    const assetType = record?.assetType;
+    return validationError(
+      `${datasetId} on ${host} has no queryable rows: SODA answered with no fields${assetType ? `, and the Discovery catalog lists its asset type as ${assetType}` : ', as it does for a map, chart, or other non-tabular asset'}.`,
+      {
+        host,
+        reason: 'not_tabular',
+        dataset_id: datasetId,
+        ...(assetType ? { asset_type: assetType } : {}),
+        ...(record?.parentDatasetIds ? { parent_dataset_ids: record.parentDatasetIds } : {}),
+      },
+    );
   }
 
   /**
@@ -877,11 +950,15 @@ export class SocrataService {
 
       const id = String(resource.id ?? '');
       const domainCname = String(metadata.domain ?? '');
+      const assetType = nonBlankString(resource.type);
+      const parentDatasetIds = catalogParentIds(resource.parent_fxf);
 
       return {
         datasetId: id,
         domain: domainCname,
         name: String(resource.name ?? ''),
+        ...(assetType ? { assetType } : {}),
+        ...(parentDatasetIds ? { parentDatasetIds } : {}),
         ...(resource.description ? { description: String(resource.description) } : {}),
         ...(classification.domain_category
           ? { category: String(classification.domain_category) }
@@ -961,11 +1038,13 @@ export class SocrataService {
       .filter((c): c is DatasetColumn => c !== null);
 
     const { rowCount, rowCountSource } = deriveRowCount(raw, rawColumns);
+    const assetType = nonBlankString(raw.assetType);
 
     return {
       datasetId,
       domain: host,
       name: String(raw.name ?? ''),
+      ...(assetType ? { assetType } : {}),
       ...(raw.description ? { description: String(raw.description) } : {}),
       ...(raw.category ? { category: String(raw.category) } : {}),
       tags: Array.isArray(raw.tags) ? (raw.tags as string[]) : [],
@@ -1029,6 +1108,15 @@ export class SocrataService {
       ROW_ARRAY,
       [...params.keys()].some((key) => key !== '$limit' && key !== '$offset'),
     );
+
+    // A map, chart, calendar, or visualization answers with one `{}` per row
+    // of its source table and no fields. A table names its fields even when
+    // nothing matches or every projected value is null, so the empty header,
+    // not the empty rows, is the signal — checked before the recount and the
+    // staging copy would treat those objects as matching rows.
+    if (sodaFields(headers)?.length === 0) {
+      throw await this.fieldlessAssetError(host, opts.datasetId, ctx);
+    }
 
     // Count the matching rows when the page cannot tell: it filled the limit
     // (more may match), or it came back empty past offset 0 (the offset may

@@ -1,11 +1,12 @@
 /**
  * @fileoverview Server-specific environment variable configuration for socrata-mcp-server.
- * Parsed lazily on first access via parseEnvConfig for clear error messaging.
+ * Parsed once, by getServerConfig() in createApp()'s setup(), via parseEnvConfig for
+ * clear error messaging; nothing parses it at module import.
  * @module config/server-config
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { parseConfig, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   appToken: z
@@ -36,24 +37,64 @@ const ServerConfigSchema = z.object({
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 
+const ENV_VARS = {
+  appToken: 'SOCRATA_APP_TOKEN',
+  defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
+  dataframeDropEnabled: 'SOCRATA_DATAFRAME_DROP_ENABLED',
+  clampLimits: 'SOCRATA_CLAMP_LIMITS',
+} as const satisfies Record<keyof ServerConfig, string>;
+
+const SCHEMA_DEFAULTS: ServerConfig = ServerConfigSchema.parse({});
+
 let _config: ServerConfig | undefined;
 
 /**
- * The server config, parsed once. Tool modules read it at import (the clamp
- * switch shapes an input schema, the drop flag picks a definition), before
- * src/index.ts reaches its own parseConfig() call. Under Node the framework
- * loads `.env` only inside parseConfig() (Bun loads it at startup), so it runs
- * first here: otherwise a value set only in `.env` is missed and cached as unset.
+ * The server config, parsed once. src/index.ts calls it first in setup(), after
+ * createApp() has loaded `.env` and parsed its own config, so an invalid value
+ * stops startup with the banner naming the variable. Never call it at import:
+ * a ConfigurationError thrown there exits on a raw stack trace instead.
  */
 export function getServerConfig(): ServerConfig {
-  if (!_config) {
-    parseConfig();
-    _config = parseEnvConfig(ServerConfigSchema, {
-      appToken: 'SOCRATA_APP_TOKEN',
-      defaultDomain: 'SOCRATA_DEFAULT_DOMAIN',
-      dataframeDropEnabled: 'SOCRATA_DATAFRAME_DROP_ENABLED',
-      clampLimits: 'SOCRATA_CLAMP_LIMITS',
-    });
-  }
+  _config ??= parseEnvConfig(ServerConfigSchema, ENV_VARS);
   return _config;
+}
+
+/**
+ * The config an input schema reads when it validates or is emitted: what
+ * setup() parsed, or the schema defaults before it runs. Never parses the
+ * environment, since `tool()` emits every input schema when its definition
+ * module is imported.
+ */
+export function activeServerConfig(): ServerConfig {
+  return _config ?? SCHEMA_DEFAULTS;
+}
+
+/**
+ * Loads the working directory's `.env` into `process.env`, never overriding a
+ * variable already set, for a read made before createApp(): Bun loads `.env` at
+ * startup, but under Node the framework loads it only inside createApp().
+ * Every failure is left to createApp(), which loads the file again and reports
+ * any failure but a missing file in its startup banner. Node reports an
+ * unreadable file as missing, so under Node the server starts without it.
+ */
+export function preloadEnvFile(): void {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // A missing file is the usual case; createApp() reports any other failure it sees.
+  }
+}
+
+/**
+ * SOCRATA_DATAFRAME_DROP_ENABLED alone, for the drop tool's module, which picks
+ * its definition at import, before setup() parses the config. `.env` is loaded
+ * first. An invalid value reads as off here; getServerConfig() in setup() then
+ * stops startup naming it.
+ */
+export function dataframeDropFlag(): boolean {
+  preloadEnvFile();
+  const flag = ServerConfigSchema.shape.dataframeDropEnabled.safeParse(
+    process.env[ENV_VARS.dataframeDropEnabled],
+  );
+  return flag.success && flag.data;
 }

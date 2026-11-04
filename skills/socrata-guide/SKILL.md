@@ -4,12 +4,12 @@ description: Investigate civic data with socrata_* tools, check dataset coverage
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0.1"
+  version: "1.0.2"
 ---
 
 ## Scope
 
-Use Socrata for public government datasets served through SODA 2.1. Discovery also lists maps, files, and stories; find a dataset-type asset for row analysis. The tools do not edit portal data.
+Use Socrata for public government datasets served through SODA 2.1. Discovery also lists maps, charts, files, stories, and external links; each search result's `asset_type` says which it is, and only `dataset` and `filter` assets answer with rows. For row analysis of a map or chart, query a table its `parent_dataset_ids` names. The tools do not edit portal data.
 
 ## Identifiers
 
@@ -17,7 +17,7 @@ Keep the portal and dataset identity from a discovery result together through an
 
 ## Gates
 
-- Before concluding that a jurisdiction has no data, search datasets beyond the curated portal list. An empty portal-name search establishes only that no entry in that list matched. Broaden restrictive category and tag filters before treating an empty dataset search as evidence of absence.
+- Before concluding that a jurisdiction has no data, search datasets beyond the curated portal list. An empty portal-name search establishes only that no entry in that list matched. Broaden restrictive category and tag filters before treating an empty dataset search as evidence of absence. Category and tag filters match one portal's own vocabulary, so they work only with `domain`; search across portals with `query`.
 - Before filtering a category, inspect its actual values with a grouped count. A neighborhood, status, or agency name in the question need not match the dataset's vocabulary.
 - Before reporting a population total, distinguish approximate cached metadata counts, matching source rows, returned groups, and staged rows. A query's `total_count` counts what its rows count: matching source rows for a plain query, groups for a grouped query, distinct values for a distinct select. It is reported when more rows match than the response holds; a truncated response without one means the count failed, so more rows may match than it shows.
 - Before treating a canvas statistic as a whole-dataset statistic, establish that the staged copy covers the intended population. It starts at the query's offset and stops at 50,000 matching result rows. Prefer upstream SoQL aggregation when the population exceeds the copy or its coverage is unknown.
@@ -34,7 +34,7 @@ For conditional totals, use SoQL's `case(condition, value, true, fallback)` form
 
 ### Local analysis and comparisons
 
-Results too large to return inline are staged as a DataCanvas table, and the response carries a `canvas_id`. Call `socrata_dataframe_describe` with it for the staged table and column names before writing SQL, then `socrata_dataframe_query` with a read-only query. Pass the same `canvas_id` back to stage further results beside the first; the tables expire with the canvas.
+Results too large to return inline are staged as a DataCanvas table, and the response carries a `canvas_id`. Call `socrata_dataframe_describe` with it for the staged table and column names before writing SQL, then `socrata_dataframe_query` with a read-only query. Pass the same `canvas_id` back to stage further results beside the first; the tables expire with the canvas. For a quick look at a few rows, pass `stage: false`: the call returns the page alone and stages nothing, leaving any canvas you pass untouched.
 
 Use that shared canvas for different datasets with distinct IDs after checking the join and coverage gates. Describe it after staging each dataset to confirm both tables remain. A successful inline response without a canvas token supplies no staged table to query.
 

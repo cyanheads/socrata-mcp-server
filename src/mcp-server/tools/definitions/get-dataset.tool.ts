@@ -7,6 +7,8 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
+import { DatasetIdSchema } from '@/mcp-server/dataset-id-schema.js';
 import {
   escapeTableCell,
   inlineUpstream,
@@ -14,13 +16,12 @@ import {
 } from '@/mcp-server/tools/upstream-text.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
 import type { DatasetMetadata } from '@/services/socrata/types.js';
-import { DATASET_ID_PATTERN } from '@/services/socrata/types.js';
 
 export const getDataset = tool('socrata_get_dataset', {
   title: 'Get Dataset Schema',
   description:
     "Fetch full metadata and column schema for a Socrata dataset by ID. Returns field names, data types, descriptions, row count, and licensing. Always call this before writing a socrata_query_dataset — the column types determine correct WHERE clause syntax: Number columns accept bare literals (year=2023) while Text columns require single-quoted strings (year='2023').",
-  annotations: { readOnlyHint: true, idempotentHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     domain: z
       .string()
@@ -28,16 +29,15 @@ export const getDataset = tool('socrata_get_dataset', {
       .describe(
         'Portal the dataset lives on, as a bare hostname (e.g. data.cityofnewyork.us); URL forms like https://data.cityofnewyork.us/ are accepted and reduced to the host. Pass the domain from the same socrata_find_datasets result as dataset_id. Defaults to SOCRATA_DEFAULT_DOMAIN or data.seattle.gov, which is wrong for another portal’s ID.',
       ),
-    dataset_id: z
-      .string()
-      .describe(
-        'Four-by-four dataset ID matching pattern like kzjm-xkqj. IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
-      ),
+    dataset_id: DatasetIdSchema.describe(
+      'Four-by-four dataset ID matching pattern like kzjm-xkqj. IDs are portal-scoped: take it from socrata_find_datasets together with that result’s domain.',
+    ),
   }),
   output: z.object({
     dataset_id: z.string().describe('Four-by-four dataset ID.'),
     domain: z.string().describe('Portal domain hosting this dataset.'),
     name: z.string().describe('Dataset display name.'),
+    asset_type: AssetTypeSchema,
     description: z.string().optional().describe('Dataset description when available.'),
     category: z.string().optional().describe('Domain category when available.'),
     tags: z.array(z.string()).describe('Associated tags.'),
@@ -81,13 +81,6 @@ export const getDataset = tool('socrata_get_dataset', {
 
   errors: [
     {
-      reason: 'invalid_id',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'Dataset ID does not match the four-by-four pattern.',
-      recovery:
-        'Dataset IDs are always 9 characters like kzjm-xkqj. Obtain from socrata_find_datasets.',
-    },
-    {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Valid ID format but the dataset does not exist on the domain queried — including a gateway HTTP 403 for an ID the portal does not serve.',
@@ -129,13 +122,6 @@ export const getDataset = tool('socrata_get_dataset', {
   async handler(input, ctx) {
     const domain = input.domain?.trim() ? input.domain.trim() : getServerConfig().defaultDomain;
 
-    if (!DATASET_ID_PATTERN.test(input.dataset_id)) {
-      throw ctx.fail(
-        'invalid_id',
-        `Invalid dataset ID "${input.dataset_id}". Expected pattern like kzjm-xkqj.`,
-      );
-    }
-
     ctx.log.info('Fetching dataset metadata', { domain, datasetId: input.dataset_id });
 
     const svc = getSocrataService();
@@ -175,6 +161,7 @@ export const getDataset = tool('socrata_get_dataset', {
       dataset_id: meta.datasetId,
       domain: meta.domain,
       name: meta.name,
+      ...(meta.assetType ? { asset_type: meta.assetType } : {}),
       ...(meta.description ? { description: meta.description } : {}),
       ...(meta.category ? { category: meta.category } : {}),
       tags: meta.tags,
@@ -197,7 +184,9 @@ export const getDataset = tool('socrata_get_dataset', {
     // render the name quoted on a single line, the description as a labeled
     // blockquote, and table cells escaped for pipes and newlines.
     lines.push(`## "${escapeMarkdownInline(inlineUpstream(result.name))}"`);
-    lines.push(`**ID:** ${result.dataset_id} | **Domain:** ${result.domain}`);
+    const type =
+      result.asset_type != null ? ` | **Type:** ${escapeMarkdownInline(result.asset_type)}` : '';
+    lines.push(`**ID:** ${result.dataset_id} | **Domain:** ${result.domain}${type}`);
     if (result.category) lines.push(`**Category:** ${escapeMarkdownInline(result.category)}`);
     if (result.tags.length)
       lines.push(`**Tags:** ${result.tags.map(escapeMarkdownInline).join(', ')}`);

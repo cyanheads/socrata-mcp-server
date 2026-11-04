@@ -6,7 +6,8 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { normalizeEnv, parseConfig, resetConfig } from '@cyanheads/mcp-ts-core/config';
+import { normalizeEnv } from '@cyanheads/mcp-ts-core/config';
+import { getServerConfig, preloadEnvFile } from './config/server-config.js';
 import { exploreOpenData } from './mcp-server/prompts/definitions/explore-open-data.prompt.js';
 import { datasetResource } from './mcp-server/resources/definitions/dataset.resource.js';
 import { portalsResource } from './mcp-server/resources/definitions/portals.resource.js';
@@ -20,12 +21,13 @@ import { queryDataset } from './mcp-server/tools/definitions/query-dataset.tool.
 import { setCanvas } from './services/canvas-accessor.js';
 import { initSocrataService } from './services/socrata/socrata-service.js';
 
-parseConfig();
-// DataCanvas defaults on; set CANVAS_PROVIDER_TYPE=none to disable it.
+// DataCanvas defaults on; set CANVAS_PROVIDER_TYPE=none to disable it. `.env` is
+// loaded first so a value set only there counts under Node too. Nothing parses
+// config before createApp(), which reports an invalid value in its banner.
+preloadEnvFile();
 process.env.CANVAS_PROVIDER_TYPE =
   normalizeEnv({ CANVAS_PROVIDER_TYPE: process.env.CANVAS_PROVIDER_TYPE }).CANVAS_PROVIDER_TYPE ??
   'duckdb';
-resetConfig();
 
 await createApp({
   name: 'socrata-mcp-server',
@@ -58,6 +60,8 @@ await createApp({
     "  Text columns: single-quoted strings (year='2023')\n" +
     'Set SOCRATA_APP_TOKEN for higher rate limits. Large result sets spill to DataCanvas for SQL via socrata_dataframe_query.',
   setup(core) {
+    // First: an invalid SOCRATA_* value stops startup here, with the banner naming it.
+    getServerConfig();
     initSocrataService();
     // Canvas lives on CoreServices, not on the per-request Context — expose it
     // to handlers through the module-level accessor.

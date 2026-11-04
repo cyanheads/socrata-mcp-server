@@ -24,6 +24,8 @@ export type DatasetMetadata = {
   datasetId: string;
   domain: string;
   name: string;
+  /** Catalog asset type from the views API `assetType` (`dataset`, `filter`, `map`, …). */
+  assetType?: string;
   description?: string;
   category?: string;
   tags: string[];
@@ -39,6 +41,10 @@ export type DiscoveryResult = {
   datasetId: string;
   domain: string;
   name: string;
+  /** Catalog asset type from Discovery `resource.type` (`dataset`, `filter`, `map`, …). */
+  assetType?: string;
+  /** IDs of the assets this one is built from, from Discovery `resource.parent_fxf`, in its order. */
+  parentDatasetIds?: string[];
   description?: string;
   category?: string;
   tags: string[];

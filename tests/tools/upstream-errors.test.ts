@@ -8,6 +8,7 @@
  * @module tests/tools/upstream-errors.test
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
@@ -16,10 +17,13 @@ import { findDatasets } from '@/mcp-server/tools/definitions/find-datasets.tool.
 import { getDataset } from '@/mcp-server/tools/definitions/get-dataset.tool.js';
 import { listPortals } from '@/mcp-server/tools/definitions/list-portals.tool.js';
 import { queryDataset } from '@/mcp-server/tools/definitions/query-dataset.tool.js';
+import { setCanvas } from '@/services/canvas-accessor.js';
 import { initSocrataService, resetPortalCountCache } from '@/services/socrata/socrata-service.js';
 import { contentText } from './content-text.js';
 
-vi.mock('@/config/server-config.js', () => ({
+// The input schemas read the real activeServerConfig(): the schema defaults, since nothing parses.
+vi.mock('@/config/server-config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/config/server-config.js')>()),
   getServerConfig: vi.fn().mockReturnValue({ defaultDomain: 'data.seattle.gov' }),
 }));
 
@@ -172,6 +176,11 @@ describe('unknown_domain for hosts that are not Socrata portals (#27)', () => {
     expect(error.data.recovery?.hint).toContain('socrata_list_portals');
     expect(text).toContain('Domain not found: data.sandiego.gov');
     expect(text).toContain('socrata_list_portals');
+    // Dropping domain drops categories and tags with it (#65).
+    const dropDomain =
+      'omit domain to search every indexed portal, with query in place of any categories or tags, which need domain.';
+    expect(error.data.recovery?.hint).toContain(dropDomain);
+    expect(text).toContain(dropDomain);
   });
 });
 
@@ -454,11 +463,10 @@ describe('the 50-second call deadline on every tool that reaches an upstream (#5
     expect(recovery).toContain('order');
   });
 
-  it('names the search filters in the socrata_find_datasets recovery', () => {
-    const recovery = deadlineOf(findDatasets.errors)?.recovery;
-    for (const lever of ['domain', 'categories', 'tags', 'query']) {
-      expect(recovery).toContain(lever);
-    }
+  it('names the search filters in the socrata_find_datasets recovery, categories and tags with domain', () => {
+    expect(deadlineOf(findDatasets.errors)?.recovery).toBe(
+      'Retry with a narrower search: set domain, add categories or tags alongside domain, or use a more specific query.',
+    );
   });
 
   it('bounds a socrata://datasets read by the same deadline', async () => {
@@ -906,5 +914,188 @@ describe('hosts that do not serve the SODA API reach the caller typed, on the fi
       'Police Department Incident Reports',
     );
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('socrata_query_dataset on a map or chart fails not_tabular before any recount or staging (#64)', () => {
+  // A canvas is configured, so a field-less page that filled the limit would stage.
+  const acquire = vi.fn();
+
+  beforeEach(() => {
+    const registerTable = vi.fn().mockResolvedValue({ tableName: 'x', rowCount: 0 });
+    acquire.mockReset().mockResolvedValue({ canvasId: 'canvas1234', isNew: true, registerTable });
+    setCanvas({ acquire } as unknown as DataCanvas);
+  });
+
+  afterEach(() => {
+    setCanvas(undefined);
+  });
+
+  /** The row endpoint of a map or chart as live: 200, empty field headers, one `{}` per source row. */
+  const fieldlessRows = () =>
+    json([{}, {}], 200, { 'X-SODA2-Fields': '[]', 'X-SODA2-Types': '[]' });
+
+  /**
+   * SODA answers row requests with `page`, the `$query` recount with 1154,
+   * and Discovery `?ids=` with a record carrying `resource`.
+   */
+  function route(page: () => Response, resource: Record<string, unknown>, domain: string) {
+    fetchSpy.mockImplementation((input) => {
+      const url = new URL(String(input));
+      if (url.origin === DISCOVERY_ORIGIN) {
+        return Promise.resolve(
+          json({ results: [{ resource: { id: 'x', ...resource }, metadata: { domain } }] }),
+        );
+      }
+      return Promise.resolve(url.searchParams.has('$query') ? json([{ n: '1154' }]) : page());
+    });
+  }
+
+  const sodaRequests = () =>
+    fetchSpy.mock.calls
+      .map((c) => new URL(String(c[0])))
+      .filter((url) => url.origin !== DISCOVERY_ORIGIN);
+
+  it.each([
+    [
+      'a7mk-8suc',
+      'data.nj.gov',
+      'map',
+      ['t6tk-mr48'],
+      'a7mk-8suc is a map built on t6tk-mr48; query that dataset_id on data.nj.gov.',
+    ],
+    [
+      'dfnk-7re6',
+      'data.cityofchicago.org',
+      'map',
+      ['x2n5-8w5q'],
+      'dfnk-7re6 is a map built on x2n5-8w5q; query that dataset_id on data.cityofchicago.org.',
+    ],
+    [
+      'egkx-k86t',
+      'data.cdc.gov',
+      'chart',
+      ['kh8y-3es6'],
+      'egkx-k86t is a chart built on kh8y-3es6; query that dataset_id on data.cdc.gov.',
+    ],
+    [
+      'jwm6-8ydu',
+      'data.montgomerycountymd.gov',
+      'map',
+      ['5pue-gfbe', '59qn-t8y9'],
+      'jwm6-8ydu is a map built on 5pue-gfbe, 59qn-t8y9; query one of those dataset_ids on data.montgomerycountymd.gov.',
+    ],
+  ])(
+    '%s on %s names its parents on both surfaces, with no recount or staging request',
+    async (datasetId, domain, type, parents, hint) => {
+      route(fieldlessRows, { type, parent_fxf: parents }, domain);
+
+      const { error, text } = errorOf(
+        await runToolContract(queryDataset, { domain, dataset_id: datasetId, limit: 2 }),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'not_tabular',
+        host: domain,
+        dataset_id: datasetId,
+        asset_type: type,
+        parent_dataset_ids: parents,
+        recovery: { hint },
+      });
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain(`asset type as ${type}`);
+      expect(text).toContain('reason not_tabular');
+      // One row request, one Discovery lookup: no recount, no staging copy, no canvas.
+      expect(sodaRequests()).toHaveLength(1);
+      expect(sodaRequests()[0]?.searchParams.has('$query')).toBe(false);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(acquire).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the declared only: "datasets" recovery when the catalog lists no parent', async () => {
+    route(fieldlessRows, { type: 'chart', parent_fxf: [] }, 'data.cdc.gov');
+
+    const { error, text } = errorOf(
+      await runToolContract(queryDataset, {
+        domain: 'data.cdc.gov',
+        dataset_id: 'egkx-k86t',
+        limit: 2,
+      }),
+    );
+
+    expect(error.data.reason).toBe('not_tabular');
+    expect(error.data.asset_type).toBe('chart');
+    expect(error.data).not.toHaveProperty('parent_dataset_ids');
+    expect(error.data.recovery?.hint).toContain('only: "datasets"');
+    expect(text).toContain('only: "datasets"');
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  describe('responses that keep today’s handling (characterization)', () => {
+    it('count(*) on the map returns its one row', async () => {
+      route(
+        () =>
+          json([{ n: '1154' }], 200, { 'X-SODA2-Fields': '["n"]', 'X-SODA2-Types': '["number"]' }),
+        {},
+        'data.nj.gov',
+      );
+
+      const result = await runToolContract(queryDataset, {
+        domain: 'data.nj.gov',
+        dataset_id: 'a7mk-8suc',
+        select: 'count(*) as n',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as { rows: unknown[] }).rows).toEqual([{ n: '1154' }]);
+      expect(contentText(result)).toContain('| 1154 |');
+    });
+
+    it('an all-null projection returns its {} rows as data', async () => {
+      route(
+        () =>
+          json([{}, {}], 200, {
+            'X-SODA2-Fields': '["location"]',
+            'X-SODA2-Types': '["location"]',
+          }),
+        {},
+        'data.cityofchicago.org',
+      );
+
+      const result = await runToolContract(queryDataset, {
+        domain: 'data.cityofchicago.org',
+        dataset_id: 'ijzp-q8t2',
+        select: 'location',
+        where: 'location IS NULL',
+        limit: 2,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ rows: [{}, {}], row_count: 2 });
+    });
+
+    it('a zero-match where on a real table returns an empty success', async () => {
+      route(
+        () =>
+          json([], 200, {
+            'X-SODA2-Fields': '["id","primary_type"]',
+            'X-SODA2-Types': '["number","text"]',
+          }),
+        {},
+        'data.cityofchicago.org',
+      );
+
+      const result = await runToolContract(queryDataset, {
+        domain: 'data.cityofchicago.org',
+        dataset_id: 'ijzp-q8t2',
+        where: 'id=-1',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ rows: [], row_count: 0 });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });

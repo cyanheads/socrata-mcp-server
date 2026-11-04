@@ -886,6 +886,308 @@ describe('SocrataService.queryDataset SODA field types (#25)', () => {
   });
 });
 
+describe('SocrataService.queryDataset on an asset SODA answers with no fields (#64)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  /** A map or chart's row endpoint as live: 200, empty field headers, one `{}` per source row. */
+  const emptyFieldsPage = (rowCount: number) =>
+    jsonResponse(
+      Array.from({ length: rowCount }, () => ({})),
+      200,
+      'OK',
+      { 'X-SODA2-Fields': '[]', 'X-SODA2-Types': '[]' },
+    );
+
+  /** A Discovery `?ids=` answer whose one record carries `resource` fields beside its id. */
+  const catalogRecord = (resource: Record<string, unknown>, id = 'a7mk-8suc') =>
+    jsonResponse(
+      {
+        results: [
+          { resource: { id, name: 'X', ...resource }, metadata: { domain: 'data.nj.gov' } },
+        ],
+        resultSetSize: 1,
+      },
+      200,
+      'OK',
+    );
+
+  /**
+   * Serve SODA row requests from `page`, the `$query` recount with 1154 (the
+   * map's live source-row count), and Discovery with `discovery`.
+   */
+  function route(
+    page: () => Response,
+    discovery: (input: unknown, init?: RequestInit) => Promise<Response> = () =>
+      Promise.resolve(catalogRecord({ type: 'map', parent_fxf: ['t6tk-mr48'] })),
+  ) {
+    fetchSpy.mockImplementation((input, init) => {
+      if (originOf(input) === DISCOVERY_ORIGIN) return discovery(input, init);
+      return Promise.resolve(
+        new URL(String(input)).searchParams.has('$query')
+          ? jsonResponse([{ n: '1154' }], 200, 'OK', {
+              'X-SODA2-Fields': '["n"]',
+              'X-SODA2-Types': '["number"]',
+            })
+          : page(),
+      );
+    });
+  }
+
+  const discoveryCalls = () =>
+    fetchSpy.mock.calls.filter((c) => originOf(c[0]) === DISCOVERY_ORIGIN);
+  const recountCalls = () =>
+    fetchSpy.mock.calls.filter(
+      (c) =>
+        originOf(c[0]) !== DISCOVERY_ORIGIN && new URL(String(c[0])).searchParams.has('$query'),
+    );
+
+  const MAP = { domain: 'data.nj.gov', datasetId: 'a7mk-8suc', limit: 2 };
+
+  it('fails a map’s field-less rows as not_tabular naming its type and parent, before any recount', async () => {
+    route(() => emptyFieldsPage(2));
+
+    const err = await rejectionOf(svc.queryDataset(MAP, createMockContext()));
+
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data).toEqual({
+      reason: 'not_tabular',
+      host: 'data.nj.gov',
+      dataset_id: 'a7mk-8suc',
+      asset_type: 'map',
+      parent_dataset_ids: ['t6tk-mr48'],
+    });
+    expect(err.message).toBe(
+      'a7mk-8suc on data.nj.gov has no queryable rows: SODA answered with no fields, and the Discovery catalog lists its asset type as map.',
+    );
+    expect(recountCalls()).toHaveLength(0);
+    expect(discoveryCalls()).toHaveLength(1);
+    expect(new URL(String(discoveryCalls()[0]?.[0])).searchParams.get('ids')).toBe('a7mk-8suc');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('names every parent in Discovery’s order (jwm6-8ydu)', async () => {
+    route(
+      () => emptyFieldsPage(2),
+      () =>
+        Promise.resolve(
+          catalogRecord({ type: 'map', parent_fxf: ['5pue-gfbe', '59qn-t8y9'] }, 'jwm6-8ydu'),
+        ),
+    );
+
+    const err = await rejectionOf(
+      svc.queryDataset(
+        { domain: 'data.montgomerycountymd.gov', datasetId: 'jwm6-8ydu', limit: 2 },
+        createMockContext(),
+      ),
+    );
+
+    expect(err.data).toMatchObject({
+      reason: 'not_tabular',
+      asset_type: 'map',
+      parent_dataset_ids: ['5pue-gfbe', '59qn-t8y9'],
+    });
+  });
+
+  it('fails an empty page with no fields the same way — the header, not the rows, is the signal', async () => {
+    route(() => emptyFieldsPage(0));
+
+    const err = await rejectionOf(svc.queryDataset(MAP, createMockContext()));
+
+    expect(err.data).toMatchObject({ reason: 'not_tabular', parent_dataset_ids: ['t6tk-mr48'] });
+    expect(recountCalls()).toHaveLength(0);
+  });
+
+  it.each([
+    ['a 404', () => jsonResponse({ error: 'Not found' }, 404, 'Not Found'), undefined],
+    ['a 403', () => htmlResponse(403, 'Forbidden'), undefined],
+    [
+      'a 429',
+      () => jsonResponse({ message: 'slow' }, 429, 'Too Many Requests', { 'Retry-After': '0' }),
+      undefined,
+    ],
+    [
+      'a 5xx',
+      () => new Response('oops', { status: 503, statusText: 'Service Unavailable' }),
+      undefined,
+    ],
+    ['a non-JSON body', () => new Response('<html>catalog</html>', { status: 200 }), undefined],
+    [
+      'no record for the ID',
+      () => jsonResponse({ results: [], resultSetSize: 0 }, 200, 'OK'),
+      undefined,
+    ],
+    [
+      'a record with an empty parent_fxf',
+      () => catalogRecord({ type: 'chart', parent_fxf: [] }),
+      'chart',
+    ],
+    ['a record without type or parent_fxf', () => catalogRecord({}), undefined],
+    [
+      'a record whose parent_fxf is not a list of IDs',
+      () => catalogRecord({ type: 'map', parent_fxf: 't6tk-mr48' }),
+      'map',
+    ],
+  ])(
+    'still fails not_tabular, never not_found, when the lookup answers %s — one attempt, no parent named',
+    async (_l, discovery, assetType) => {
+      route(
+        () => emptyFieldsPage(2),
+        () => Promise.resolve(discovery()),
+      );
+
+      const err = await rejectionOf(svc.queryDataset(MAP, createMockContext()));
+
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toEqual({
+        reason: 'not_tabular',
+        host: 'data.nj.gov',
+        dataset_id: 'a7mk-8suc',
+        ...(assetType ? { asset_type: assetType } : {}),
+      });
+      expect(discoveryCalls()).toHaveLength(1);
+      expect(recountCalls()).toHaveLength(0);
+    },
+  );
+
+  it('still fails not_tabular when the lookup fails on the network', async () => {
+    route(
+      () => emptyFieldsPage(2),
+      () => Promise.reject(new TypeError('fetch failed')),
+    );
+
+    const err = await rejectionOf(svc.queryDataset(MAP, createMockContext()));
+
+    expect(err.data).toEqual({
+      reason: 'not_tabular',
+      host: 'data.nj.gov',
+      dataset_id: 'a7mk-8suc',
+    });
+    expect(discoveryCalls()).toHaveLength(1);
+  });
+
+  it('abandons a hung lookup at its 2.5 s bound and fails not_tabular then', async () => {
+    vi.useFakeTimers();
+    route(() => emptyFieldsPage(2), hangUntilAborted);
+
+    const { state, outcome } = track(svc.queryDataset(MAP, createMockContext()));
+    await vi.advanceTimersByTimeAsync(2_499);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    const { error } = await outcome;
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'not_tabular', host: 'data.nj.gov', dataset_id: 'a7mk-8suc' },
+    });
+    expect((error as McpError).data).not.toHaveProperty('parent_dataset_ids');
+    expect(discoveryCalls()).toHaveLength(1);
+    expect(recountCalls()).toHaveLength(0);
+  });
+
+  it('fails as cancelled, not not_tabular, when the caller aborts during the lookup', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('Caller cancelled the query', 'AbortError');
+    route(
+      () => emptyFieldsPage(2),
+      (input, init) => {
+        controller.abort(cancellation);
+        return hangUntilAborted(input, init);
+      },
+    );
+
+    const err = await svc
+      .queryDataset(MAP, createMockContext({ signal: controller.signal }))
+      .catch((e: unknown) => e);
+
+    expect(err).toBe(cancellation);
+    expect(recountCalls()).toHaveLength(0);
+  });
+
+  describe('responses that keep today’s handling (characterization)', () => {
+    it('returns a count over the map’s source rows: its header names the alias', async () => {
+      route(() =>
+        jsonResponse([{ n: '1154' }], 200, 'OK', {
+          'X-SODA2-Fields': '["n"]',
+          'X-SODA2-Types': '["number"]',
+        }),
+      );
+
+      const result = await svc.queryDataset(
+        { domain: 'data.nj.gov', datasetId: 'a7mk-8suc', select: 'count(*) as n' },
+        createMockContext(),
+      );
+
+      expect(result.rows).toEqual([{ n: '1154' }]);
+      expect(discoveryCalls()).toHaveLength(0);
+    });
+
+    it('returns an all-null projection’s {} rows as data, recounted when they fill the limit', async () => {
+      route(() =>
+        jsonResponse([{}, {}], 200, 'OK', {
+          'X-SODA2-Fields': '["location"]',
+          'X-SODA2-Types': '["location"]',
+        }),
+      );
+
+      const result = await svc.queryDataset(
+        {
+          domain: 'data.cityofchicago.org',
+          datasetId: 'ijzp-q8t2',
+          select: 'location',
+          where: 'location IS NULL',
+          limit: 2,
+        },
+        createMockContext(),
+      );
+
+      expect(result.rows).toEqual([{}, {}]);
+      expect(result.totalCount).toBe(1154);
+      expect(discoveryCalls()).toHaveLength(0);
+    });
+
+    it('returns an empty success for a zero-match where on a real table: its header lists the fields', async () => {
+      route(() =>
+        jsonResponse([], 200, 'OK', {
+          'X-SODA2-Fields': '["id","primary_type"]',
+          'X-SODA2-Types': '["number","text"]',
+        }),
+      );
+
+      const result = await svc.queryDataset(
+        { domain: 'data.cityofchicago.org', datasetId: 'ijzp-q8t2', where: 'id=-1', limit: 2 },
+        createMockContext(),
+      );
+
+      expect(result.rows).toEqual([]);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns {} rows as data when the response carries no X-SODA2-Fields header', async () => {
+      route(() => jsonResponse([{}, {}], 200, 'OK'));
+
+      const result = await svc.queryDataset(MAP, createMockContext());
+
+      expect(result.rows).toEqual([{}, {}]);
+      expect(result.fieldTypes).toBeUndefined();
+      expect(result.totalCount).toBe(1154);
+      expect(discoveryCalls()).toHaveLength(0);
+    });
+  });
+});
+
 describe('SocrataService.listPortals portal-count cache', () => {
   let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
@@ -1997,6 +2299,99 @@ describe('SocrataService.findDatasets column_names mapping (#29)', () => {
     const { results } = await svc.findDatasets({ query: 'x' }, createMockContext());
 
     expect(results[0]?.columnNames).toEqual(['a', 'b']);
+  });
+});
+
+describe('SocrataService catalog asset type and parent IDs (#68)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  /** A story's 21 parents, the most any sampled record listed. */
+  const STORY_PARENTS = Array.from({ length: 21 }, (_, i) => `p${String(i).padStart(3, '0')}-abcd`);
+
+  it.each([
+    ['a map with one parent', { type: 'map', parent_fxf: ['x2n5-8w5q'] }, 'map', ['x2n5-8w5q']],
+    ['a filtered view', { type: 'filter', parent_fxf: ['ijzp-q8t2'] }, 'filter', ['ijzp-q8t2']],
+    [
+      'a dataset, whose parent_fxf is empty',
+      { type: 'dataset', parent_fxf: [] },
+      'dataset',
+      undefined,
+    ],
+    ['a record without type or parent_fxf', {}, undefined, undefined],
+    ['a blank type and a null parent_fxf', { type: '', parent_fxf: null }, undefined, undefined],
+    [
+      'a non-string type and a string parent_fxf',
+      { type: 7, parent_fxf: 'x2n5-8w5q' },
+      undefined,
+      undefined,
+    ],
+    [
+      'a story with 21 parents, in order',
+      { type: 'story', parent_fxf: STORY_PARENTS },
+      'story',
+      STORY_PARENTS,
+    ],
+    [
+      'entries that are not four-by-four IDs',
+      { type: 'map', parent_fxf: ['5pue-gfbe', null, 7, 'not an id', '59qn-t8y9'] },
+      'map',
+      ['5pue-gfbe', '59qn-t8y9'],
+    ],
+  ])('findDatasets maps %s', async (_l, resource, assetType, parents) => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          results: [
+            {
+              resource: { id: 'dfnk-7re6', name: 'Crimes - Map', ...resource },
+              metadata: { domain: 'data.cityofchicago.org' },
+              classification: {},
+            },
+          ],
+          resultSetSize: 1,
+        },
+        200,
+        'OK',
+      ),
+    );
+
+    const [result] = (await svc.findDatasets({ query: 'crimes' }, createMockContext())).results;
+
+    if (assetType) expect(result?.assetType).toBe(assetType);
+    else expect(result).not.toHaveProperty('assetType');
+    if (parents) expect(result?.parentDatasetIds).toEqual(parents);
+    else expect(result).not.toHaveProperty('parentDatasetIds');
+    // The fields beside them are unchanged.
+    expect(result).toMatchObject({ datasetId: 'dfnk-7re6', name: 'Crimes - Map', tags: [] });
+  });
+
+  it.each([
+    ['the views assetType', { assetType: 'map' }, 'map'],
+    ['a dataset', { assetType: 'dataset' }, 'dataset'],
+    ['no assetType', {}, undefined],
+    ['a blank assetType', { assetType: '' }, undefined],
+    ['a non-string assetType', { assetType: { name: 'map' } }, undefined],
+  ])('getDataset reports %s', async (_l, extra, assetType) => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse({ id: 'a7mk-8suc', name: 'NJ map', columns: [], ...extra }, 200, 'OK'),
+    );
+
+    const meta = await svc.getDataset('data.nj.gov', 'a7mk-8suc', createMockContext());
+
+    if (assetType) expect(meta.assetType).toBe(assetType);
+    else expect(meta).not.toHaveProperty('assetType');
+    expect(meta).toMatchObject({ datasetId: 'a7mk-8suc', name: 'NJ map', columns: [] });
   });
 });
 

@@ -689,3 +689,280 @@ describe('socrata_query_dataset limit above the per-call cap through the real se
     expect(pages).toEqual(['5000', '50000']);
   });
 });
+
+describe('socrata_query_dataset stage input (#69)', () => {
+  /** Five rows of a 150-row match: a page that fills limit with more rows past it. */
+  const PEEK = { domain: 'data.cityofchicago.org', dataset_id: 'ijzp-q8t2', limit: 5 };
+
+  /** Staging copies sent since the mock was installed: the requests for 50,000 rows. */
+  const stagingRequests = () =>
+    fetchMock.calls
+      .map((c) => new URL(c.request.url).searchParams)
+      .filter((p) => p.get('$limit') === '50000');
+
+  /** The page notice a server without a canvas returns for PEEK. */
+  const CANVASLESS_NOTICE =
+    'Rows filled the limit — more rows may match (exact count in total_count). Page with offset or raise limit (max 5000).';
+
+  /** Run `args` on a server without a canvas, restoring the shared one after. */
+  async function withoutCanvas(args: Parameters<typeof runToolContract<typeof queryDataset>>[1]) {
+    setCanvas(undefined);
+    try {
+      return await runToolContract(queryDataset, args);
+    } finally {
+      setCanvas(canvas);
+    }
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stages by default: one staging request, one canvas acquired, the staged-table notice', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const acquire = vi.spyOn(canvas, 'acquire');
+
+    const result = await runToolContract(queryDataset, PEEK);
+
+    const sc = result.structuredContent as Record<string, unknown>;
+    expect(sc).toMatchObject({
+      rows: CRIMES.slice(0, 5),
+      row_count: 5,
+      total_count: 150,
+      truncated: true,
+      shown: 5,
+      cap: 5,
+      canvas_row_count: 150,
+      table_name: 'ijzp_q8t2_rows',
+    });
+    expect(sc.canvas_id).toEqual(expect.any(String));
+    expect(sc.notice).toBe(
+      `Rows filled the limit — more rows may match (exact count in total_count). Staged 150 rows as table "ijzp_q8t2_rows" on canvas ${String(sc.canvas_id)}: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. The staged copy stops at 50,000 rows; page with offset for rows beyond it.`,
+    );
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(stagingRequests()).toHaveLength(1);
+    // The page, the recount, and the staging copy.
+    expect(fetchMock.calls).toHaveLength(3);
+  });
+
+  it('pages without staging on a server without a canvas', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+
+    const result = await withoutCanvas(PEEK);
+
+    const sc = result.structuredContent as Record<string, unknown>;
+    expect(sc).toMatchObject({ row_count: 5, total_count: 150, truncated: true, shown: 5, cap: 5 });
+    expect(sc.notice).toBe(CANVASLESS_NOTICE);
+    for (const key of ['canvas_id', 'canvas_row_count', 'table_name']) {
+      expect(sc).not.toHaveProperty(key);
+    }
+    expect(stagingRequests()).toEqual([]);
+    expect(fetchMock.calls).toHaveLength(2);
+  });
+
+  it('stage: false sends no staging request, acquires no canvas, and answers as a canvas-less server does', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const staged = await runToolContract(queryDataset, PEEK);
+    const canvasless = await withoutCanvas(PEEK);
+    fetchMock.restore();
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const acquire = vi.spyOn(canvas, 'acquire');
+
+    const peek = await runToolContract(queryDataset, { ...PEEK, stage: false });
+
+    expect(peek.isError).toBeFalsy();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(stagingRequests()).toEqual([]);
+    expect(fetchMock.calls).toHaveLength(2);
+    const sc = peek.structuredContent as Record<string, unknown>;
+    const fields = ['rows', 'row_count', 'total_count', 'truncated', 'shown', 'cap'];
+    const pick = (o: unknown) =>
+      Object.fromEntries(fields.map((k) => [k, (o as Record<string, unknown>)[k]]));
+    expect(pick(sc)).toEqual(pick(staged.structuredContent));
+    expect(pick(sc)).toMatchObject({ row_count: 5, total_count: 150, truncated: true, cap: 5 });
+    for (const key of ['canvas_id', 'canvas_row_count', 'table_name']) {
+      expect(sc).not.toHaveProperty(key);
+    }
+    expect(sc.notice).toBe(CANVASLESS_NOTICE);
+    expect(sc).toEqual(canvasless.structuredContent);
+    expect(contentText(peek)).toBe(contentText(canvasless));
+  });
+
+  it('stage: true answers exactly as the omitted default', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const omitted = await runToolContract(queryDataset, PEEK);
+    const explicit = await runToolContract(queryDataset, { ...PEEK, stage: true });
+
+    const strip = (o: unknown) => {
+      const { canvas_id: id, notice, ...rest } = o as Record<string, unknown>;
+      return { ...rest, notice: String(notice).replace(String(id), '<canvas>') };
+    };
+    expect(strip(explicit.structuredContent)).toEqual(strip(omitted.structuredContent));
+    expect((explicit.structuredContent as Record<string, unknown>).canvas_row_count).toBe(150);
+    // Two calls, each sending its own staging copy.
+    expect(stagingRequests()).toHaveLength(2);
+  });
+
+  it('stage: false leaves a held canvas unchanged and names the canvas_id and table_name it did not use', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const first = await runToolContract(queryDataset, { ...PEEK, table_name: 'all_crimes' });
+    const canvasId = String((first.structuredContent as Record<string, unknown>).canvas_id);
+    const tables = async () =>
+      (
+        await dataframeDescribe.handler(
+          dataframeDescribe.input.parse({ canvas_id: canvasId }),
+          createMockContext({ errors: dataframeDescribe.errors }),
+        )
+      ).tables.map((t) => [t.table_id, t.row_count]);
+    expect(await tables()).toEqual([['all_crimes', 150]]);
+    fetchMock.restore();
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const acquire = vi.spyOn(canvas, 'acquire');
+
+    const peek = await runToolContract(queryDataset, {
+      ...PEEK,
+      where: "primary_type='THEFT'",
+      canvas_id: canvasId,
+      table_name: 'thefts',
+      stage: false,
+    });
+
+    expect(acquire).not.toHaveBeenCalled();
+    expect(stagingRequests()).toEqual([]);
+    expect(await tables()).toEqual([['all_crimes', 150]]);
+    const sc = peek.structuredContent as Record<string, unknown>;
+    for (const key of ['canvas_id', 'canvas_row_count', 'table_name']) {
+      expect(sc).not.toHaveProperty(key);
+    }
+    const notice = `Rows filled the limit — more rows may match (exact count in total_count). Nothing was staged: stage is false, so canvas_id ${canvasId} and table_name "thefts" went unused. Page with offset or raise limit (max 5000).`;
+    expect(sc.notice).toBe(notice);
+    expect(contentText(peek)).toContain(`> ${notice}`);
+  });
+
+  it('stage: false names an unused canvas_id alone', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const first = await runToolContract(queryDataset, PEEK);
+    const canvasId = String((first.structuredContent as Record<string, unknown>).canvas_id);
+
+    const peek = await runToolContract(queryDataset, {
+      ...PEEK,
+      canvas_id: canvasId,
+      stage: false,
+    });
+
+    expect((peek.structuredContent as Record<string, unknown>).notice).toBe(
+      `Rows filled the limit — more rows may match (exact count in total_count). Nothing was staged: stage is false, so canvas_id ${canvasId} went unused. Page with offset or raise limit (max 5000).`,
+    );
+  });
+
+  it('stage: false names an unused table_name on a page holding the whole match, instead of the stage-it hint', async () => {
+    serveSoda(CRIMES.slice(0, 3), CRIME_HEADERS);
+    const staged = await runToolContract(queryDataset, { ...PEEK, table_name: 'thefts' });
+    expect((staged.structuredContent as Record<string, unknown>).notice).toBe(
+      'Nothing was staged as table "thefts": no rows match past this page, and only a match that runs past the page is staged. Rerun with a limit below 3 to stage these rows.',
+    );
+
+    const peek = await runToolContract(queryDataset, {
+      ...PEEK,
+      table_name: 'thefts',
+      stage: false,
+    });
+
+    const sc = peek.structuredContent as Record<string, unknown>;
+    expect(sc.row_count).toBe(3);
+    expect(sc).not.toHaveProperty('truncated');
+    const notice = 'Nothing was staged: stage is false, so table_name "thefts" went unused.';
+    expect(sc.notice).toBe(notice);
+    expect(contentText(peek)).toContain(`> ${notice}`);
+  });
+
+  it('stage: false serves an over-cap limit at 5,000 with the continue notice and no staging', async () => {
+    serveSoda(
+      Array.from({ length: 5002 }, (_, i) => ({ id: String(i + 1) })),
+      { 'X-SODA2-Fields': '["id"]', 'X-SODA2-Types': '["number"]' },
+    );
+    const acquire = vi.spyOn(canvas, 'acquire');
+
+    const result = await runToolContract(queryDataset, { ...PEEK, limit: 8000, stage: false });
+
+    const sc = result.structuredContent as Record<string, unknown>;
+    expect(sc.rows).toHaveLength(5000);
+    expect(sc).toMatchObject({ total_count: 5002, truncated: true, shown: 5000, cap: 5000 });
+    expect(sc).not.toHaveProperty('canvas_id');
+    expect(sc.notice).toBe(
+      'The requested limit 8000 was served as 5000: the per-call cap is 5000, and more rows may match (exact count in total_count). Continue with offset 5000.',
+    );
+    expect(acquire).not.toHaveBeenCalled();
+    expect(stagingRequests()).toEqual([]);
+  });
+
+  it('stage: false past the end answers as the default call: the past-the-end notice, no unused-input sentence', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+    const args = { ...PEEK, offset: 200, table_name: 'thefts' };
+    const staged = await runToolContract(queryDataset, args);
+    const peek = await runToolContract(queryDataset, { ...args, stage: false });
+
+    const notice =
+      'The offset 200 is past the end of the 150 matching rows. Page with an offset below 150.';
+    expect((staged.structuredContent as Record<string, unknown>).notice).toBe(notice);
+    expect(peek.structuredContent).toEqual(staged.structuredContent);
+    expect(contentText(peek)).toBe(contentText(staged));
+  });
+
+  it.each([
+    ['omitted', {}],
+    ['false', { stage: false }],
+  ])(
+    'stage %s changes nothing on a server without a canvas, a named table included',
+    async (_label, stage) => {
+      serveSoda(CRIMES, CRIME_HEADERS);
+      const args = { ...PEEK, table_name: 'thefts' };
+      const baseline = await withoutCanvas(args);
+      const result = await withoutCanvas({ ...args, ...stage });
+
+      expect(result.structuredContent).toEqual(baseline.structuredContent);
+      expect(contentText(result)).toBe(contentText(baseline));
+      expect((result.structuredContent as Record<string, unknown>).notice).toBe(
+        'Rows filled the limit — more rows may match (exact count in total_count). Nothing was staged as table "thefts": this server has no DataCanvas. Page with offset or raise limit (max 5000).',
+      );
+      expect(stagingRequests()).toEqual([]);
+    },
+  );
+
+  it('rejects a stage value that is not a boolean before any request', async () => {
+    serveSoda(CRIMES, CRIME_HEADERS);
+
+    // Deliberately not a boolean: the schema, not the type system, must refuse it.
+    const stage = 'sometimes' as unknown as boolean;
+    const result = await runToolContract(queryDataset, { ...PEEK, stage });
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data.issues).toEqual([
+      expect.objectContaining({ code: 'invalid_type', expected: 'boolean', path: ['stage'] }),
+    ]);
+    expect(contentText(result)).toContain(
+      'stage: Invalid input: expected boolean, received string',
+    );
+    expect(fetchMock.calls).toHaveLength(0);
+  });
+
+  it('describes stage and names it wherever the spill is described', () => {
+    expect(queryDataset.input.shape.stage.description).toBe(
+      'Stage the matching rows on a canvas when more rows match past this page and the server has a canvas. Default true. Pass false to return the page alone, skipping the staging request; canvas_id and table_name then go unused.',
+    );
+    for (const text of [
+      queryDataset.description,
+      queryDataset.input.shape.limit.description,
+      queryDataset.input.shape.canvas_id.description,
+      queryDataset.enrichment!.notice.description,
+      queryDataset.enrichment!.truncated.description,
+    ]) {
+      // The input by name, not "staged" or "staging", which the 0.6.0 texts already carried.
+      expect(text).toMatch(/\bstage (is (not )?)?false\b/);
+    }
+  });
+});

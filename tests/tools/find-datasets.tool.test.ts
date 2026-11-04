@@ -7,6 +7,7 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
 import { findDatasets } from '@/mcp-server/tools/definitions/find-datasets.tool.js';
 import { contentText } from './content-text.js';
 
@@ -29,17 +30,21 @@ afterEach(() => {
 });
 
 /**
- * Import a fresh copy of the tool with SOCRATA_CLAMP_LIMITS set to `flag`, its
- * service accessor returning `service`. The schema reads the flag at import, so
- * each mode needs its own module instance. `''` reads as unset: importing the
- * config loads `.env`, which refills a deleted key but never overrides a set one.
+ * Import a fresh copy of the tool, its service accessor returning `service`,
+ * then parse the config with SOCRATA_CLAMP_LIMITS set to `flag`, as setup()
+ * does: the `limit` schema reads the parsed switch. `''` reads as unset and is
+ * never overwritten by a `.env` load, as a deleted key would be.
  */
 async function loadFindDatasets(flag: string, service: unknown = mockService) {
   vi.stubEnv('SOCRATA_CLAMP_LIMITS', flag);
   vi.resetModules();
   const accessor = await import('@/services/socrata/socrata-service.js');
   (accessor.getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(service);
-  return (await import('@/mcp-server/tools/definitions/find-datasets.tool.js')).findDatasets;
+  const { findDatasets: def } = await import(
+    '@/mcp-server/tools/definitions/find-datasets.tool.js'
+  );
+  (await import('@/config/server-config.js')).getServerConfig();
+  return def;
 }
 
 /** `count` service-shaped Discovery results, numbered from `start`. */
@@ -54,23 +59,56 @@ function discoveryResults(count: number, start = 0) {
 }
 
 const WINDOW_TAIL =
-  'The Discovery catalog serves only the first 10,000 matches of a search, so no later page exists; narrow the search with domain, categories, tags, query, or only to reach the rest.';
+  'The Discovery catalog serves only the first 10,000 matches of a search, so no later page exists; narrow the search with domain, query, or only, or with categories or tags alongside domain, to reach the rest.';
 
 describe('findDatasets', () => {
   it('escapes caller filters in authored notices while retaining the raw query echo', async () => {
     const ctx = createMockContext({ errors: findDatasets.errors });
     mockFindDatasets.mockResolvedValue({ results: [], totalCount: 0 });
     await findDatasets.handler(
-      findDatasets.input.parse({ query: '[x](https://example.com)', tags: ['*tag*'] }),
+      findDatasets.input.parse({
+        query: '[x](https://example.com)',
+        domain: 'data.cdc.gov',
+        tags: ['*tag*'],
+      }),
       ctx,
     );
     expect(getEnrichment(ctx)).toEqual({
       totalCount: 0,
       effectiveQuery: '[x](https://example.com)',
       notice:
-        'No datasets matched with query="\\[x\\](https://example.com)", tags=\\*tag\\*. Try broader search terms, remove category/tag filters, or omit domain to search all portals.',
+        'No datasets matched with query="\\[x\\](https://example.com)", domain=data.cdc.gov, tags=\\*tag\\*. Try broader search terms, remove category/tag filters, or omit domain and those filters to search all portals.',
     });
   });
+
+  it.each([
+    [
+      { query: 'xyzabcnotreal' },
+      'No datasets matched with query="xyzabcnotreal". Try broader search terms.',
+    ],
+    [
+      { domain: 'data.seattle.gov', query: 'xyzabcnotreal' },
+      'No datasets matched with query="xyzabcnotreal", domain=data.seattle.gov. Try broader search terms, or omit domain to search all portals.',
+    ],
+    [
+      { domain: 'data.cityofchicago.org', categories: ['Public Safety', 'Transportation'] },
+      'No datasets matched with domain=data.cityofchicago.org, categories=Public Safety,Transportation. Try broader search terms, remove category/tag filters, or omit domain and those filters to search all portals.',
+    ],
+    [
+      { domain: '  ', query: 'xyzabcnotreal', tags: [] },
+      'No datasets matched with query="xyzabcnotreal". Try broader search terms.',
+    ],
+  ])(
+    'offers only the levers the empty search can pull on both surfaces (%j)',
+    async (args, notice) => {
+      mockFindDatasets.mockResolvedValue({ results: [], totalCount: 0 });
+
+      const result = await runToolContract(findDatasets, args);
+
+      expect((result.structuredContent as Record<string, unknown>).notice).toBe(notice);
+      expect(contentText(result)).toContain(`> ${notice}`);
+    },
+  );
 
   it('returns results for a basic query', async () => {
     const ctx = createMockContext({ errors: findDatasets.errors });
@@ -149,7 +187,7 @@ describe('findDatasets', () => {
     const result = await runToolContract(findDatasets, { query: 'xyzabcnotreal', offset: 20 });
 
     expect((result.structuredContent as Record<string, unknown>).notice).toBe(
-      'No datasets matched with query="xyzabcnotreal". Try broader search terms, remove category/tag filters, or omit domain to search all portals.',
+      'No datasets matched with query="xyzabcnotreal". Try broader search terms.',
     );
   });
 
@@ -491,7 +529,7 @@ describe('findDatasets per-call cap and the 10,000-match window (#53, #55)', () 
         reason: 'result_window_exceeded',
         offset,
         recovery: {
-          hint: 'Narrow the search with domain, categories, tags, query, or only so the matches you need fall within the first 10,000, then page with an offset below 10,000.',
+          hint: 'Narrow the search with domain, query, or only, or with categories or tags alongside domain, so the matches you need fall within the first 10,000, then page with an offset below 10,000.',
         },
       });
       expect(contentText(result)).toContain(
@@ -535,17 +573,18 @@ describe('findDatasets per-call cap and the 10,000-match window (#53, #55)', () 
     const result = await runToolContract(def, { query: 'xyzabcnotreal', limit: 1000 });
 
     expect((result.structuredContent as { notice?: string }).notice).toBe(
-      'No datasets matched with query="xyzabcnotreal". Try broader search terms, remove category/tag filters, or omit domain to search all portals.',
+      'No datasets matched with query="xyzabcnotreal". Try broader search terms.',
     );
   });
 
-  it('describes the multi-value filters as ORed and the offset bound', () => {
+  it('describes the multi-value filters as ORed and needing domain, and the offset bound', () => {
     expect(def.input.shape.categories.description).toBe(
-      'Filter by domain categories (e.g. ["Public Safety", "Transportation"]). Multiple values are ORed: a dataset in any listed category matches.',
+      'Filter by the portal\'s own categories (e.g. ["Public Safety", "Transportation"]). Requires domain: each portal assigns its own categories. Multiple values are ORed: a dataset in any listed category matches. Across portals, search with query instead.',
     );
     expect(def.input.shape.tags.description).toBe(
-      'Filter by tags (e.g. ["covid19", "permits"]). Multiple values are ORed: a dataset carrying any listed tag matches.',
+      'Filter by the portal\'s own tags (e.g. ["covid19", "permits"]). Requires domain: each portal assigns its own tags. Multiple values are ORed: a dataset carrying any listed tag matches. Across portals, search with query instead.',
     );
+    expect(def.input.shape.domain.description).toContain('Required with categories or tags.');
     expect(def.input.shape.offset.description).toBe(
       'Pagination offset. Default 0. Must be below 10,000: the Discovery catalog serves only the first 10,000 matches of a search.',
     );
@@ -609,5 +648,233 @@ describe('findDatasets through the Discovery client (#53, #55)', () => {
       (result.structuredContent as { error: { data: { reason: string } } }).error.data.reason,
     ).toBe('result_window_exceeded');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('findDatasets categories and tags need domain, through the Discovery client (#65)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  let def: typeof findDatasets;
+
+  const RECOVERY =
+    'Pass domain to filter one portal by its own categories and tags, or drop categories and tags and use query for a keyword search across every portal.';
+
+  beforeEach(async () => {
+    const { SocrataService } = await vi.importActual<
+      typeof import('@/services/socrata/socrata-service.js')
+    >('@/services/socrata/socrata-service.js');
+    def = await loadFindDatasets('true', new SocrataService());
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname !== 'api.us.socrata.com') throw new Error(`Unexpected request: ${url}`);
+      return Response.json({ results: [], resultSetSize: 0 });
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['tags', { tags: ['covid19'] }],
+    ['categories', { categories: ['Public Safety'] }],
+    ['categories and tags', { categories: ['Public Safety'], tags: ['covid19'], query: 'cases' }],
+    ['tags', { tags: ['covid19'], domain: '   ' }],
+    ['categories', { categories: ['Public Safety'], tags: [], only: 'datasets' as const }],
+  ])(
+    'rejects %s without domain as domain_required before any request (%j)',
+    async (named, args) => {
+      const result = await runToolContract(def, args);
+
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as {
+        error: { code: number; message: string; data: Record<string, unknown> };
+      };
+      const message = `${named} need domain: categories and tags match one portal's own vocabulary, and without domain the catalog matches them against a different, Socrata-wide taxonomy.`;
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(message);
+      expect(error.data).toMatchObject({ reason: 'domain_required', recovery: { hint: RECOVERY } });
+      const text = contentText(result);
+      expect(text).toContain(`Error: ${message}`);
+      expect(text).toContain(`Recovery: ${RECOVERY}`);
+      expect(text).toContain('reason domain_required');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('declares domain_required with its recovery in the error contract', () => {
+    expect(def.errors?.find((e) => e.reason === 'domain_required')).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      recovery: RECOVERY,
+    });
+  });
+
+  it('reads empty categories and tags without domain as unset and searches every portal', async () => {
+    const result = await runToolContract(def, { query: 'covid', categories: [], tags: [] });
+
+    expect(result.isError).toBeFalsy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const sent = new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams;
+    expect([...sent.entries()]).toEqual([
+      ['q', 'covid'],
+      ['limit', '10'],
+    ]);
+  });
+
+  // A blank entry filters nothing (Discovery ignores an empty `tags=`), so it
+  // reads as unset, the way a blank query or domain does.
+  it.each([
+    [
+      { query: 'covid', tags: [''] },
+      [
+        ['q', 'covid'],
+        ['limit', '10'],
+      ],
+    ],
+    [
+      { query: 'covid', categories: ['  '], tags: ['', ' '] },
+      [
+        ['q', 'covid'],
+        ['limit', '10'],
+      ],
+    ],
+    [
+      { tags: ['covid19', ''], domain: 'data.cdc.gov' },
+      [
+        ['domains', 'data.cdc.gov'],
+        ['search_context', 'data.cdc.gov'],
+        ['tags', 'covid19'],
+        ['limit', '10'],
+      ],
+    ],
+  ])('reads blank categories and tags entries as unset (%j)', async (args, params) => {
+    const result = await runToolContract(def, args);
+
+    expect(result.isError).toBeFalsy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const sent = new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams;
+    expect([...sent.entries()]).toEqual(params);
+  });
+
+  it.each([
+    [
+      { tags: ['covid19'], domain: 'data.cdc.gov' },
+      [
+        ['domains', 'data.cdc.gov'],
+        ['search_context', 'data.cdc.gov'],
+        ['tags', 'covid19'],
+        ['limit', '10'],
+      ],
+    ],
+    [
+      { categories: ['Public Safety'], domain: 'data.cityofchicago.org' },
+      [
+        ['domains', 'data.cityofchicago.org'],
+        ['search_context', 'data.cityofchicago.org'],
+        ['categories', 'Public Safety'],
+        ['limit', '10'],
+      ],
+    ],
+  ])('scopes %j to the portal with domains and search_context', async (args, params) => {
+    const result = await runToolContract(def, args);
+
+    expect(result.isError).toBeFalsy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const sent = new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams;
+    expect([...sent.entries()]).toEqual(params);
+  });
+});
+
+describe('findDatasets asset_type and parent_dataset_ids through the Discovery client (#68)', () => {
+  let def: typeof findDatasets;
+
+  /** A story's 21 parents, the most any sampled record listed. */
+  const STORY_PARENTS = Array.from({ length: 21 }, (_, i) => `s${String(i).padStart(3, '0')}-abcd`);
+
+  /** One raw Discovery result on data.cityofchicago.org, `resource` as the catalog returns it. */
+  const record = (resource: Record<string, unknown>) => ({
+    resource,
+    metadata: { domain: 'data.cityofchicago.org' },
+    classification: {},
+  });
+
+  /** Live-shaped records (2026-11-03) plus a sparse one and a 21-parent story. */
+  const RECORDS = [
+    record({ id: 'dfnk-7re6', name: 'Crimes - Map', type: 'map', parent_fxf: ['x2n5-8w5q'] }),
+    record({ id: 'vwwp-7yr9', name: 'Crimes - 2015', type: 'filter', parent_fxf: ['ijzp-q8t2'] }),
+    record({ id: 'ijzp-q8t2', name: 'Crimes - 2001 to Present', type: 'dataset', parent_fxf: [] }),
+    record({ id: 'zzzz-0001', name: 'Sparse record' }),
+    record({ id: 'zzzz-0002', name: 'Crime story', type: 'story', parent_fxf: STORY_PARENTS }),
+  ];
+
+  beforeEach(async () => {
+    const { SocrataService } = await vi.importActual<
+      typeof import('@/services/socrata/socrata-service.js')
+    >('@/services/socrata/socrata-service.js');
+    def = await loadFindDatasets('true', new SocrataService());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(Response.json({ results: RECORDS, resultSetSize: RECORDS.length })),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports each result’s asset type and parents on structuredContent, absent when the catalog lists none', async () => {
+    const result = await runToolContract(def, {
+      domain: 'data.cityofchicago.org',
+      query: 'crimes',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const { results } = result.structuredContent as {
+      results: Record<string, unknown>[];
+    };
+    expect(results.map((r) => [r.dataset_id, r.asset_type, r.parent_dataset_ids])).toEqual([
+      ['dfnk-7re6', 'map', ['x2n5-8w5q']],
+      ['vwwp-7yr9', 'filter', ['ijzp-q8t2']],
+      ['ijzp-q8t2', 'dataset', undefined],
+      ['zzzz-0001', undefined, undefined],
+      ['zzzz-0002', 'story', STORY_PARENTS],
+    ]);
+    expect(results[2]).not.toHaveProperty('parent_dataset_ids');
+    expect(results[3]).not.toHaveProperty('asset_type');
+    expect(results[3]).not.toHaveProperty('parent_dataset_ids');
+    // Existing fields are unchanged.
+    expect(results[0]).toMatchObject({
+      domain: 'data.cityofchicago.org',
+      name: 'Crimes - Map',
+      tags: [],
+      column_names: [],
+    });
+  });
+
+  it('renders the type on the ID line and every parent on a Built on line in content[]', async () => {
+    const result = await runToolContract(def, {
+      domain: 'data.cityofchicago.org',
+      query: 'crimes',
+    });
+
+    const sections = contentText(result).split('\n### ').slice(1);
+    expect(sections).toHaveLength(5);
+    expect(sections[0]).toContain(
+      '**ID:** dfnk-7re6 | **Domain:** data.cityofchicago.org | **Type:** map\n**Built on:** x2n5-8w5q\n',
+    );
+    expect(sections[1]).toContain('| **Type:** filter\n**Built on:** ijzp-q8t2\n');
+    expect(sections[2]).toContain(
+      '**ID:** ijzp-q8t2 | **Domain:** data.cityofchicago.org | **Type:** dataset\n',
+    );
+    expect(sections[2]).not.toContain('**Built on:**');
+    expect(sections[3]).toContain('**ID:** zzzz-0001 | **Domain:** data.cityofchicago.org\n');
+    expect(sections[3]).not.toContain('**Type:**');
+    expect(sections[3]).not.toContain('**Built on:**');
+    // All 21 parents, in order: no render-only cut.
+    expect(sections[4]).toContain(`**Built on:** ${STORY_PARENTS.join(', ')}\n`);
+  });
+
+  it('describes asset_type with the shared catalog asset-type text, and parent_dataset_ids', () => {
+    const { shape } = def.output.shape.results.element;
+    expect(shape.asset_type.description).toBe(AssetTypeSchema.description);
+    expect(shape.parent_dataset_ids.description).toContain('Absent when the catalog lists none');
   });
 });
