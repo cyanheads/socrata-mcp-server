@@ -98,8 +98,8 @@
     "@types/node": "^26.6.6",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.14",
-    "tsc-alias": "^1.9.9",
+    "tsc-alias": "^1.9.10",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   }
 }
