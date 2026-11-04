@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-11-03
+
+Search results and dataset records report each asset's type and parent datasets, socrata_query_dataset takes stage: false to skip canvas staging, and bad environment values stop startup with the banner.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-10-30 · ⚠️ Breaking
 
 Every upstream request a tool call makes now shares one 50-second deadline, so a slow portal fails the call retryably instead of holding it open, and large queries count, stage, and page accurately.
