@@ -21,7 +21,10 @@ export type RowCountSource = 'top_level_cached_contents' | 'column_cached_conten
 
 /** Full dataset metadata from the views API. */
 export type DatasetMetadata = {
+  /** The ID requested, whose `/resource` endpoint the columns describe. */
   datasetId: string;
+  /** The views record's own `id`, present only when it differs from `datasetId` (an alias ID). */
+  canonicalDatasetId?: string;
   domain: string;
   name: string;
   /** Catalog asset type from the views API `assetType` (`dataset`, `filter`, `map`, …). */

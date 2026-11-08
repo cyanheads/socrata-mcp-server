@@ -465,6 +465,108 @@ describe('queryDataset', () => {
     });
   });
 
+  describe('soql_error and not_tabular hints from the columns and parents the service read (#73, #74)', () => {
+    /** The handler's rethrow of a service failure carrying `data`. */
+    async function rethrown(
+      data: Record<string, unknown>,
+      message = 'SoQL error: x',
+      datasetId = 'ijzp-q8t2',
+    ) {
+      mockQueryDataset.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ValidationError, message, data),
+      );
+      const ctx = createMockContext({ errors: queryDataset.errors });
+      try {
+        await queryDataset.handler(queryDataset.input.parse({ dataset_id: datasetId }), ctx);
+      } catch (err) {
+        if (err instanceof McpError) return err;
+      }
+      throw new Error('Expected the handler to throw an McpError.');
+    }
+
+    const hintOf = (err: McpError) => (err.data?.recovery as { hint?: string } | undefined)?.hint;
+
+    it('names every referenced column with its type, casts the first to its other types, all as literals', async () => {
+      const err = await rethrown({
+        reason: 'soql_error',
+        socrataCode: 'query.soql.type-mismatch',
+        referenced_columns: [
+          { field_name: 'district', type: 'text' },
+          { field_name: 'id', type: 'number' },
+          { field_name: 'date', type: 'floating_timestamp' },
+        ],
+      });
+
+      expect(hintOf(err)).toBe(
+        "The query names district (text), id (number), and date (floating_timestamp). Text columns need single-quoted strings (year='2020'), and a quoted value matches only as stored; Number columns use bare literals (year=2020). To use a column as another type, cast it: district::number or district::floating_timestamp.",
+      );
+      expect(err.literals).toEqual([
+        'district',
+        'id',
+        'date',
+        'district::number',
+        'district::floating_timestamp',
+      ]);
+    });
+
+    it('falls back to the column-free casts when the service read no columns', async () => {
+      const err = await rethrown({ reason: 'soql_error', socrataCode: 'query.soql.type-mismatch' });
+
+      expect(hintOf(err)).toMatch(
+        /^An operator or function got a value of the wrong type\. Check data_type with socrata_get_dataset: Text columns/,
+      );
+      expect(err.literals).toEqual(['col::number', 'col::text', 'col::floating_timestamp']);
+    });
+
+    it('names the similar field names of an unknown column as literals', async () => {
+      const err = await rethrown({
+        reason: 'soql_error',
+        socrataCode: 'query.soql.no-such-column',
+        column: 'distrct',
+        similar_columns: ['district'],
+      });
+
+      expect(hintOf(err)).toBe(
+        `"distrct" is not a column. Similar field names: district. If it is a text value, single-quote it ('distrct').`,
+      );
+      expect(err.literals).toEqual(['district']);
+    });
+
+    it('gives an unknown function its own hint, never the field-name one', async () => {
+      const err = await rethrown({
+        reason: 'soql_error',
+        socrataCode: 'query.soql.no-such-function',
+      });
+
+      const hint = hintOf(err);
+      expect(hint).toContain('https://dev.socrata.com/docs/functions/');
+      expect(hint).not.toContain('field_name');
+    });
+
+    it('names a refused story’s parents, keeping the 403’s status', async () => {
+      const err = await rethrown(
+        {
+          reason: 'not_tabular',
+          host: 'data.ny.gov',
+          status: 403,
+          dataset_id: '9hpx-asd8',
+          asset_type: 'story',
+          parent_dataset_ids: ['e52k-ymww'],
+        },
+        '9hpx-asd8 on data.ny.gov has no queryable rows: SODA refused row access, and the Discovery catalog lists its asset type as story.',
+        '9hpx-asd8',
+      );
+
+      expect(err.data).toMatchObject({
+        status: 403,
+        recovery: {
+          hint: '9hpx-asd8 is a story built on e52k-ymww; query that dataset_id on data.ny.gov.',
+        },
+      });
+      expect(err.literals).toBeUndefined();
+    });
+  });
+
   it('passes through optional SoQL clauses to service', async () => {
     const ctx = createMockContext({ errors: queryDataset.errors });
     mockQueryDataset.mockResolvedValue({
@@ -1211,7 +1313,11 @@ describe('table_name names the staged table (#58)', () => {
       canvas_id: 'canvas1234',
     });
 
-    expect(describeTables).toHaveBeenCalledWith({ tableName: 'ijzp_q8t2_rows' });
+    // The lookup carries the call's signal, so a cancelled call stops it.
+    expect(describeTables).toHaveBeenCalledWith({
+      tableName: 'ijzp_q8t2_rows',
+      signal: expect.any(AbortSignal),
+    });
     const notice =
       'Rows filled the limit — more rows may match (exact count in total_count). Staged 441 rows as table "ijzp_q8t2_rows" on canvas canvas1234: list its columns with socrata_dataframe_describe, then run SQL with socrata_dataframe_query. Replaced table "ijzp_q8t2_rows" (previously 353 rows). The staged copy stops at 50,000 rows; page with offset for rows beyond it.';
     expect((result.structuredContent as Record<string, unknown>).notice).toBe(notice);
@@ -1363,6 +1469,18 @@ describe('format() table columns are the union of every row’s keys (#49)', () 
 
     expect(text).not.toContain('| k0 |');
     expect(text).toContain(`\`\`\`json\n${JSON.stringify({ ...ten, k10: '10' })}\n\`\`\``);
+  });
+
+  it('keeps a line break in a value or a column key as a numeric reference, the row on one line (#71)', () => {
+    const lines = formatText(output([{ 'two\r\nlines': 'a', note: 'l1\nl2' }])).split('\n');
+    const header = lines.indexOf('| two&#13;&#10;lines | note |');
+
+    expect(header).toBeGreaterThan(-1);
+    expect(lines.slice(header)).toEqual([
+      '| two&#13;&#10;lines | note |',
+      '| :--- | :--- |',
+      '| a | l1&#10;l2 |',
+    ]);
   });
 
   it('renders rows whose keys all match exactly as before', () => {

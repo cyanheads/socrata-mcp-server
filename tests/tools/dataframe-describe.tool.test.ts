@@ -114,6 +114,21 @@ describe('dataframeDescribe', () => {
     expect(mockCanvas.acquire).not.toHaveBeenCalled();
   });
 
+  it("passes the call's signal to describe(), so a cancelled call stops the lookup", async () => {
+    const describeTables = vi.fn().mockResolvedValue([]);
+    setCanvas({
+      acquire: vi.fn().mockResolvedValue({ canvasId: 'abc1234567', describe: describeTables }),
+    } as unknown as DataCanvas);
+    const ctx = createMockContext({ errors: dataframeDescribe.errors });
+
+    await dataframeDescribe.handler(
+      dataframeDescribe.input.parse({ canvas_id: 'abc1234567' }),
+      ctx,
+    );
+
+    expect(describeTables).toHaveBeenCalledWith({ signal: ctx.signal });
+  });
+
   it('rejects a canvas_id that cannot be a minted token at argument validation', () => {
     // CanvasIdSchema puts the minted `^[A-Za-z0-9_-]{10}$` shape in inputSchema,
     // so a blank or wrong-length token never reaches the handler.

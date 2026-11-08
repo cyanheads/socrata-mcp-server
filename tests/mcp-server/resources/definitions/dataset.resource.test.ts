@@ -101,9 +101,10 @@ describe('datasetResource', () => {
     });
 
     it('returns whatever dataset the service returned, as socrata_get_dataset does — the not-this-dataset check lives in getDataset', async () => {
-      // getDataset rejects a views answer whose id is not the requested one
-      // (covered through the real service in tests/tools/upstream-errors.test.ts),
-      // so a returned dataset is the requested one even with an empty name.
+      // getDataset rejects a views answer that is not this dataset — one with no
+      // four-by-four id, or an off-host one whose id differs (covered through the
+      // real service in tests/tools/upstream-errors.test.ts) — so a returned
+      // dataset is the requested one even with an empty name.
       const ctx = createMockContext();
       mockGetDataset.mockResolvedValue({
         datasetId: 'aaaa-1111',
@@ -249,6 +250,57 @@ describe('datasetResource', () => {
       expect(datasetResource.output!.shape.asset_type.description).toBe(
         AssetTypeSchema.description,
       );
+    });
+  });
+
+  describe('canonical_dataset_id for an alias ID, through the real service (#70)', () => {
+    beforeEach(async () => {
+      const { SocrataService } = await vi.importActual<
+        typeof import('@/services/socrata/socrata-service.js')
+      >('@/services/socrata/socrata-service.js');
+      (getSocrataService as ReturnType<typeof vi.fn>).mockReturnValue(new SocrataService());
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** data.nj.gov `/api/views/5it6-gc2r.json` (live 2026-11-08, trimmed): same host, `t6tk-mr48`'s `id`. */
+    const aliasViews = (id: string) =>
+      Response.json({
+        id,
+        name: 'Vehicle Inspection Facility Locations',
+        assetType: 'dataset',
+        columns: [
+          { fieldName: 'geocoded_column', dataTypeName: 'point' },
+          { fieldName: 'geocoded_column_address', dataTypeName: 'text' },
+        ],
+      });
+
+    it.each([
+      ['names another four-by-four', 't6tk-mr48', 't6tk-mr48'],
+      ['echoes the requested ID', '5it6-gc2r', undefined],
+    ])('a record that %s', async (_l, id, canonical) => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(aliasViews(id)));
+
+      const params = datasetResource.params!.parse({
+        domain: 'data.nj.gov',
+        datasetId: '5it6-gc2r',
+      });
+      const result = datasetResource.output!.parse(
+        await datasetResource.handler(params, createMockContext()),
+      );
+
+      expect(result).toMatchObject({
+        dataset_id: '5it6-gc2r',
+        name: 'Vehicle Inspection Facility Locations',
+        columns: [
+          { field_name: 'geocoded_column', data_type: 'point' },
+          { field_name: 'geocoded_column_address', data_type: 'text' },
+        ],
+      });
+      if (canonical) expect(result.canonical_dataset_id).toBe(canonical);
+      else expect(result).not.toHaveProperty('canonical_dataset_id');
     });
   });
 

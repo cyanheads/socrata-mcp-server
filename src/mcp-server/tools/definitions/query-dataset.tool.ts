@@ -25,6 +25,7 @@ import {
 } from '@/mcp-server/tools/upstream-text.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSocrataService } from '@/services/socrata/socrata-service.js';
+import type { ReferencedColumn } from '@/services/socrata/soql-columns.js';
 import type { QueryResult } from '@/services/socrata/types.js';
 
 /**
@@ -98,41 +99,113 @@ function spillSchema(
 }
 
 /**
- * Recovery hint for a `soql_error`, chosen by the upstream Socrata error code:
- * a parse error, an unknown identifier, and a literal/column type mismatch
- * each have a different fix. Undefined for codes without a specific fix — the
+ * A throw-site recovery hint, with the values in it the caller sends back
+ * verbatim — field names and casts — which `content[]` renders as code.
+ */
+interface Recovery {
+  hint: string;
+  literals?: string[];
+}
+
+/** The SoQL cast targets a type-mismatch hint names, each written `<column>::<type>`. */
+const CAST_TYPES = ['number', 'text', 'floating_timestamp'] as const;
+
+const AND_LIST = new Intl.ListFormat('en', { type: 'conjunction' });
+const OR_LIST = new Intl.ListFormat('en', { type: 'disjunction' });
+
+/** The quoting rule both type-mismatch hints state. */
+const TYPE_RULES =
+  "Text columns need single-quoted strings (year='2020'), and a quoted value matches only as stored; Number columns use bare literals (year=2020).";
+
+/**
+ * The type-mismatch recovery: the columns the query references and their
+ * types when the service read them, the quoting rule, and the casts, written
+ * on the first referenced column (else `col`).
+ */
+function typeMismatchRecovery(referenced: readonly ReferencedColumn[]): Recovery {
+  const named = referenced.map((c) => ({
+    name: inlineUpstream(c.field_name, 80),
+    type: inlineUpstream(c.type, 40),
+  }));
+  const castOn = named[0]?.name ?? 'col';
+  // A cast to the column's own type repeats the mismatch, so it is left out.
+  const casts = CAST_TYPES.filter((type) => type !== referenced[0]?.type).map(
+    (type) => `${castOn}::${type}`,
+  );
+  const lead =
+    named.length > 0
+      ? `The query names ${AND_LIST.format(named.map((c) => `${c.name} (${c.type})`))}.`
+      : 'An operator or function got a value of the wrong type. Check data_type with socrata_get_dataset:';
+  return {
+    hint: `${lead} ${TYPE_RULES} To use a column as another type, cast it: ${OR_LIST.format(casts)}.`,
+    literals: [...named.map((c) => c.name), ...casts],
+  };
+}
+
+/**
+ * Recovery for a `soql_error`, chosen by the upstream Socrata error code: a
+ * parse error, an unknown identifier, an unknown function, and a type
+ * mismatch each have a different fix. A type mismatch names the columns the
+ * query references and their types, and an unknown column the field names
+ * that resemble it, when the service read them (`data.referenced_columns`,
+ * `data.similar_columns`). Undefined for codes without a specific fix — the
  * caller falls back to the declared generic recovery.
  */
-function soqlRecoveryHint(socrataCode: unknown, column: unknown): string | undefined {
+function soqlRecovery(data: Record<string, unknown>): Recovery | undefined {
+  const { socrataCode, column, referenced_columns: referenced, similar_columns: similar } = data;
   switch (socrataCode) {
     case 'query.compiler.malformed':
-      return 'Reference columns by API field name — field_name from socrata_get_dataset (cuisine_description, not "CUISINE DESCRIPTION"); a display label containing a space does not parse. Then check quoting: text values take closed single quotes (boro=\'Manhattan\').';
+      return {
+        hint: 'Reference columns by API field name — field_name from socrata_get_dataset (cuisine_description, not "CUISINE DESCRIPTION"); a display label containing a space does not parse. Then check quoting: text values take closed single quotes (boro=\'Manhattan\').',
+      };
     case 'query.soql.no-such-column': {
       const token = typeof column === 'string' && column ? inlineUpstream(column, 80) : undefined;
-      return token
-        ? `"${token}" is not a column. If it names a column, use its API field_name from socrata_get_dataset; if it is a text value, single-quote it ('${token}').`
-        : "An identifier is not a column. Use API field names (field_name from socrata_get_dataset), and single-quote text values (boro='Manhattan') so they are not read as column names.";
+      if (!token) {
+        return {
+          hint: "An identifier is not a column. Use API field names (field_name from socrata_get_dataset), and single-quote text values (boro='Manhattan') so they are not read as column names.",
+        };
+      }
+      if (Array.isArray(similar) && similar.length > 0) {
+        const names = similar.map((name) => inlineUpstream(String(name), 80));
+        return {
+          hint: `"${token}" is not a column. Similar field names: ${names.join(', ')}. If it is a text value, single-quote it ('${token}').`,
+          literals: names,
+        };
+      }
+      return {
+        hint: `"${token}" is not a column. If it names a column, use its API field_name from socrata_get_dataset; if it is a text value, single-quote it ('${token}').`,
+      };
     }
     case 'query.soql.type-mismatch':
-      return "A literal's type does not match its column. Check data_type with socrata_get_dataset: Text columns need single-quoted strings (year='2020'); Number columns use bare literals (year=2020).";
+      return typeMismatchRecovery(
+        Array.isArray(referenced) ? (referenced as ReferencedColumn[]) : [],
+      );
+    case 'query.soql.no-such-function':
+      return {
+        hint: 'SoQL has no function by that name. A cast is written col::type, such as col::number, not as a function. The functions SoQL supports are listed at https://dev.socrata.com/docs/functions/.',
+        literals: ['col::type', 'col::number'],
+      };
     default:
       return;
   }
 }
 
 /**
- * Recovery hint for a `not_tabular` asset the catalog lists as built on other
- * assets (a map or chart over its source table): every parent, in catalog
- * order, and the portal to query it on. Undefined when the error names no
- * parent — the caller falls back to the declared recovery.
+ * Recovery for a `not_tabular` asset the catalog lists as built on other
+ * assets (a map or chart over its source table, a story over the tables it
+ * embeds): every parent, in catalog order, and the portal to query it on.
+ * Undefined when the error names no parent — the caller falls back to the
+ * declared recovery.
  */
-function parentsHint(datasetId: string, data: Record<string, unknown>): string | undefined {
+function parentsRecovery(datasetId: string, data: Record<string, unknown>): Recovery | undefined {
   const { parent_dataset_ids: parents, asset_type: assetType, host } = data;
   if (!Array.isArray(parents) || parents.length === 0) return;
   const type = typeof assetType === 'string' ? inlineUpstream(assetType) : undefined;
   const asset = type ? `is ${/^[aeiou]/i.test(type) ? 'an' : 'a'} ${type}` : 'is';
   const target = parents.length === 1 ? 'that dataset_id' : 'one of those dataset_ids';
-  return `${datasetId} ${asset} built on ${parents.join(', ')}; query ${target} on ${String(host)}.`;
+  return {
+    hint: `${datasetId} ${asset} built on ${parents.join(', ')}; query ${target} on ${String(host)}.`,
+  };
 }
 
 export const queryDataset = tool('socrata_query_dataset', {
@@ -293,7 +366,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     {
       reason: 'not_tabular',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The asset has no queryable rows: SODA refused row access to a non-tabular asset (HTTP 403), or answered with no fields, as maps, charts, calendars, and visualizations do. data.asset_type and data.parent_dataset_ids then name the asset type and the tables it is built on, when the catalog lists them.',
+      when: 'The asset has no queryable rows: SODA refused row access (HTTP 403), as stories, measures, files, and links do, or answered with no fields, as maps, charts, calendars, and visualizations do. On either path data.dataset_id names the asset, and data.asset_type and data.parent_dataset_ids name its type and the tables it is built on, when the catalog lists them.',
       recovery:
         'Find a queryable table with socrata_find_datasets using only: "datasets", then retry with its dataset_id and domain.',
     },
@@ -321,7 +394,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     {
       reason: 'soql_error',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SoQL syntax error, unknown column, or literal/column type mismatch. data.socrataCode carries the upstream code and data.column the offending token when upstream names one.',
+      when: 'SoQL syntax error, unknown column or function, or a type mismatch. data.socrataCode carries the upstream code and data.column the offending token when upstream names one. One bare row request reads the field types: on a type mismatch data.referenced_columns lists the fields the query names, with their SODA types; on an unknown column that upstream names, data.similar_columns lists the field names that resemble it. Each is absent when that read fails or nothing matches.',
       recovery:
         "Check API field names (field_name) and data types with socrata_get_dataset. Text columns need single-quoted strings (year='2020'); Number columns use bare literals (year=2020).",
     },
@@ -383,12 +456,12 @@ export const queryDataset = tool('socrata_query_dataset', {
       // Re-throw service failures that map to declared contract reasons via
       // ctx.fail so a recovery hint reaches the wire. A not_found whose ID the
       // Discovery catalog places on another portal names that portal, a
-      // soql_error takes the hint for its upstream code, and a not_tabular
-      // asset the catalog lists as built on other assets names them, instead
-      // of the static hint.
+      // soql_error takes the hint for its upstream code and the columns the
+      // service read, and a not_tabular asset the catalog lists as built on
+      // other assets names them, instead of the static hint.
       if (err instanceof McpError) {
         const data = (err.data ?? {}) as Record<string, unknown>;
-        const { reason, found_on_domain: foundOn, socrataCode, column } = data;
+        const { reason, found_on_domain: foundOn } = data;
         if (
           reason === 'not_found' ||
           reason === 'not_tabular' ||
@@ -398,19 +471,19 @@ export const queryDataset = tool('socrata_query_dataset', {
           reason === 'soql_error' ||
           reason === 'rate_limited'
         ) {
-          const hint =
+          const recovery: Recovery | undefined =
             reason === 'not_found' && typeof foundOn === 'string'
-              ? `${input.dataset_id} is on ${foundOn} — retry with domain "${foundOn}".`
+              ? { hint: `${input.dataset_id} is on ${foundOn} — retry with domain "${foundOn}".` }
               : reason === 'soql_error'
-                ? soqlRecoveryHint(socrataCode, column)
+                ? soqlRecovery(data)
                 : reason === 'not_tabular'
-                  ? parentsHint(input.dataset_id, data)
+                  ? parentsRecovery(input.dataset_id, data)
                   : undefined;
           throw ctx.fail(
             reason,
             err.message,
-            { ...data, ...(hint ? { recovery: { hint } } : {}) },
-            { cause: err },
+            { ...data, ...(recovery ? { recovery: { hint: recovery.hint } } : {}) },
+            { cause: err, ...(recovery?.literals ? { literals: recovery.literals } : {}) },
           );
         }
       }
@@ -500,7 +573,9 @@ export const queryDataset = tool('socrata_query_dataset', {
         }
         // The table this spill replaces: one the canvas already holds under
         // the name. A canvas this call minted holds none.
-        const [replaced] = instance.isNew ? [] : await instance.describe({ tableName });
+        const [replaced] = instance.isNew
+          ? []
+          : await instance.describe({ tableName, signal: ctx.signal });
         const registered = await instance.registerTable(tableName, canvasRows, {
           schema: spillSchema(canvasRows, qResult.fieldTypes),
         });
@@ -614,7 +689,7 @@ export const queryDataset = tool('socrata_query_dataset', {
     // drop rows from content[] that structuredContent-reading clients still see.
     if (cols.length > 0 && cols.length <= 10) {
       // Row values (and column keys) are upstream-controlled — escape pipes and
-      // newlines so a value can never split its cell or its row.
+      // encode line breaks as &#10;/&#13; so a value can never split its cell or its row.
       lines.push(`| ${cols.map((c) => escapeTableCell(c)).join(' | ')} |`);
       lines.push(`| ${cols.map(() => ':---').join(' | ')} |`);
       for (const row of result.rows) {

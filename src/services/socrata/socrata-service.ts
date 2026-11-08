@@ -14,6 +14,7 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { referencedColumns, similarColumns } from './soql-columns.js';
 import type {
   DatasetColumn,
   DatasetMetadata,
@@ -43,16 +44,29 @@ const DISCOVERY_BASE = 'https://api.us.socrata.com/api/catalog/v1';
 const DISCOVERY_HOST = new URL(DISCOVERY_BASE).host;
 
 /**
- * Budget for the best-effort Discovery `?ids=` lookup on a dataset not_found
- * or a row answer with no fields (not_tabular). One attempt, outside
- * `withRetry` — the lookup only runs on a request that has already failed
- * (live: 0.33–0.51 s per call), so it must never add seconds. The call's
- * deadline caps it further.
+ * Budget for the best-effort Discovery `?ids=` lookup on a dataset not_found,
+ * or on a not_tabular asset (SODA's non-tabular 403, or a row answer with no
+ * fields). One attempt, outside `withRetry` — the lookup only runs on a
+ * request that has already failed (live: 0.33–1.5 s per call), so it must
+ * never add more than this. The call's deadline caps it further.
  */
 const DISCOVERY_LOOKUP_TIMEOUT_MS = 2_500;
 
-/** One bare-row diagnostic on an already-failed query, without retries; the call's deadline caps it further. */
+/**
+ * The bare-row gateway diagnostic on an already-failed query: one attempt,
+ * without retries; the call's deadline caps it further.
+ */
 const QUERY_DIAGNOSTIC_TIMEOUT_MS = 2_500;
+
+/**
+ * Budget for the bare `$limit=0` field-type read behind a `soql_error`'s
+ * column hints: one attempt, no retries, capped further by the call's
+ * deadline. The row endpoint plans even a zero-row read through the query
+ * coordinator (live, Chicago `ijzp-q8t2`: 0.3–11.8 s, median about 5 s), so
+ * the read gets the recount's bound, which still leaves the failed query most
+ * of the 50 s deadline.
+ */
+const FIELD_TYPE_READ_TIMEOUT_MS = 15_000;
 
 /**
  * Budget for the best-effort recount of a query's matching rows: one attempt,
@@ -309,25 +323,34 @@ function fetchErrorCode(err: unknown): unknown {
 interface ExpectedBody {
   /** Noun phrase for error messages, e.g. "the metadata of dataset kzjm-xkqj". */
   describe: string;
-  matches: (body: unknown) => boolean;
+  /** `sameHost` is false when a redirect carried the request to another host. */
+  matches: (body: unknown, sameHost: boolean) => boolean;
   sameHostReason: 'not_found' | 'unknown_domain';
 }
 
-/** A SODA `/resource` answer: always a JSON array of rows. */
-const ROW_ARRAY: ExpectedBody = {
+/** A SODA `/resource` answer: always a JSON array of rows, from any host. */
+const ROW_ARRAY = {
   describe: 'a SODA row array',
   matches: Array.isArray,
   sameHostReason: 'unknown_domain',
-};
+} satisfies ExpectedBody;
 
-/** A views-API answer for `datasetId`: an object whose `id` is that dataset. */
+/**
+ * A views-API answer for `datasetId`: an object whose `id` is that dataset or,
+ * from the requested host itself, any four-by-four — the portal answering an
+ * alias ID with its canonical record (data.nj.gov `5it6-gc2r` → `t6tk-mr48`).
+ * After a redirect to another host only the requested `id` counts.
+ */
 function datasetMetadata(datasetId: string): ExpectedBody {
   return {
     describe: `the metadata of dataset ${datasetId}`,
-    matches: (body) =>
-      typeof body === 'object' &&
-      body !== null &&
-      (body as Record<string, unknown>).id === datasetId,
+    matches: (body, sameHost) => {
+      if (typeof body !== 'object' || body === null) return false;
+      const { id } = body as Record<string, unknown>;
+      return (
+        id === datasetId || (sameHost && typeof id === 'string' && DATASET_ID_PATTERN.test(id))
+      );
+    },
     sameHostReason: 'not_found',
   };
 }
@@ -507,8 +530,8 @@ export class SocrataService {
    * failure classification"): a hostname DNS has no address for, a 404 that is
    * not a SODA error body, a redirect off the requested host to anything but
    * `expected`, and a Discovery 404 are `unknown_domain`; a SODA 404, a gateway
-   * 403 (not a SODA body), and a same-host views answer that is not the dataset
-   * are `not_found`; a 429 is `rate_limited` whatever the body. `unknown_domain`
+   * 403 (not a SODA body), and a same-host views answer with no four-by-four
+   * `id` are `not_found`; a 429 is `rate_limited` whatever the body. `unknown_domain`
    * and `not_found` are non-transient, so they fail on the first attempt; every
    * other network error and a same-host non-JSON 2xx stay transient.
    */
@@ -733,7 +756,7 @@ export class SocrataService {
         { host },
       );
     }
-    if (expected && !expected.matches(body)) {
+    if (expected && !expected.matches(body, finalHost === host)) {
       if (finalHost !== host) {
         throw notFound(
           `${host} does not look like a Socrata portal: the request was redirected to ${finalHost}, which did not answer with ${expected.describe}.`,
@@ -752,12 +775,15 @@ export class SocrataService {
   }
 
   /**
-   * Fetch one dataset's SODA URL. A dataset ID is only meaningful on its own
-   * portal, so a `not_found` is rebuilt to name the ID and the domain queried
-   * (`data.domain`, `data.dataset_id`) and, when the Discovery catalog places
-   * the ID on a different portal, that portal (`data.found_on_domain`). A
-   * gateway 403 for an ID the catalog places on this very host is the host
-   * refusing a real dataset, so it becomes `unknown_domain` instead.
+   * Fetch one dataset's SODA URL, adding to its failure what the dataset ID
+   * makes knowable: a `not_found` names the ID, the domain queried, and the
+   * portal the catalog places it on ({@link datasetNotFoundError}); SODA's
+   * non-tabular 403 names the asset type and the tables it is built on
+   * ({@link nonTabularAssetError}); a row query's `soql_error` names the
+   * columns its fix turns on ({@link soqlErrorWithColumns}). `query` marks a
+   * row request and carries its clauses. Each addition costs one bounded side
+   * request whose failure leaves the original error; only the caller's
+   * cancellation replaces it.
    */
   private async fetchDatasetJson<T>(
     url: string,
@@ -765,146 +791,268 @@ export class SocrataService {
     datasetId: string,
     ctx: Context,
     expected: ExpectedBody,
-    diagnoseQuery = false,
+    query?: QueryDatasetOptions,
   ): Promise<{ body: T; headers: Headers }> {
     try {
       return await this.fetchJsonResponse<T>(url, ctx, expected);
     } catch (err) {
       ctx.signal.throwIfAborted();
-      if (!(err instanceof McpError) || err.data?.reason !== 'not_found') throw err;
-      const foundOn = (await this.lookupCatalogRecord(datasetId, ctx))?.domain;
-      ctx.signal.throwIfAborted();
-      const refused = err.data.status === 403;
-      const onThisPortal = foundOn !== undefined && sameCatalogPortal(foundOn, domain);
-      if (refused && onThisPortal) {
-        if (diagnoseQuery && (await this.acceptsBareRows(domain, datasetId, ctx))) {
-          throw validationError(
-            'The portal gateway rejected the query text; a bare row request to this dataset succeeded.',
-            { host: domain, status: 403, reason: 'query_rejected', dataset_id: datasetId },
-            { cause: err },
-          );
-        }
-        throw notFound(
-          `${domain} refused dataset ${datasetId} with HTTP 403 and a gateway page although the Discovery catalog lists it there: the host is not serving the SODA API to this server.`,
-          { ...err.data, reason: 'unknown_domain', dataset_id: datasetId },
-          { cause: err },
-        );
+      if (!(err instanceof McpError)) throw err;
+      switch (err.data?.reason) {
+        case 'not_found':
+          throw await this.datasetNotFoundError(err, domain, datasetId, ctx, query);
+        case 'not_tabular':
+          throw await this.nonTabularAssetError(domain, datasetId, ctx, err);
+        case 'soql_error':
+          throw query ? await this.soqlErrorWithColumns(err, domain, datasetId, query, ctx) : err;
+        default:
+          throw err;
       }
-      throw notFound(
-        refused
-          ? `Dataset ${datasetId} not found on ${domain}: the host answered HTTP 403 with a gateway page instead of a Socrata error.`
-          : `Dataset ${datasetId} not found on ${domain}.`,
-        {
-          ...err.data,
-          domain,
-          dataset_id: datasetId,
-          ...(foundOn && !onThisPortal ? { found_on_domain: foundOn } : {}),
-        },
-        { cause: err },
-      );
-    }
-  }
-
-  /** A failed diagnostic is inconclusive; only a successful row array proves query sensitivity. */
-  private async acceptsBareRows(domain: string, datasetId: string, ctx: Context): Promise<boolean> {
-    const boundMs = Math.min(QUERY_DIAGNOSTIC_TIMEOUT_MS, this.remainingMs(ctx));
-    if (boundMs === 0) return false;
-    const bound = new AbortController();
-    const timer = setTimeout(() => bound.abort(), boundMs);
-    try {
-      const url = new URL(`https://${domain}/resource/${datasetId}.json`);
-      url.searchParams.set('$limit', '1');
-      const response = await fetch(url.toString(), {
-        headers: this.buildHeaders(),
-        signal: AbortSignal.any([ctx.signal, bound.signal]),
-      });
-      ctx.signal.throwIfAborted();
-      if (!response.ok) return false;
-      const rows = parseJsonBody(await response.text());
-      ctx.signal.throwIfAborted();
-      return ROW_ARRAY.matches(rows);
-    } catch (err) {
-      ctx.signal.throwIfAborted();
-      ctx.log.debug('Bare-row gateway diagnostic was inconclusive', {
-        datasetId,
-        error: String(err),
-      });
-      return false;
-    } finally {
-      clearTimeout(timer);
     }
   }
 
   /**
-   * Best-effort Discovery `?ids=` lookup of the catalog record for a dataset
-   * ID: the portal that catalogs it, its asset type, and the assets it is
-   * built from. One attempt under its own short timeout; any failure (timeout,
-   * 429, 5xx, malformed body, network) resolves `undefined` so the caller's
-   * original failure stands unchanged. The caller's cancellation is rethrown.
+   * A dataset request's `not_found`, rebuilt for a dataset ID that is only
+   * meaningful on its own portal: it names the ID and the domain queried
+   * (`data.domain`, `data.dataset_id`) and, when the Discovery catalog places
+   * the ID on another portal, that portal (`data.found_on_domain`). A gateway
+   * 403 for an ID the catalog places on this very host is the host refusing a
+   * real dataset: `unknown_domain`, or `query_rejected` when the row query
+   * carried clauses and a bare row request succeeds.
    */
-  private async lookupCatalogRecord(
+  private async datasetNotFoundError(
+    err: McpError,
+    domain: string,
     datasetId: string,
     ctx: Context,
-  ): Promise<CatalogRecord | undefined> {
-    const boundMs = Math.min(DISCOVERY_LOOKUP_TIMEOUT_MS, this.remainingMs(ctx));
+    query: QueryDatasetOptions | undefined,
+  ): Promise<McpError> {
+    const foundOn = (await this.lookupCatalogRecord(datasetId, ctx))?.domain;
+    ctx.signal.throwIfAborted();
+    const refused = err.data?.status === 403;
+    const onThisPortal = foundOn !== undefined && sameCatalogPortal(foundOn, domain);
+    if (refused && onThisPortal) {
+      const clauses =
+        query &&
+        [query.select, query.search, query.where, query.group, query.having, query.order].some(
+          Boolean,
+        );
+      if (clauses && (await this.acceptsBareRows(domain, datasetId, ctx))) {
+        return validationError(
+          'The portal gateway rejected the query text; a bare row request to this dataset succeeded.',
+          { host: domain, status: 403, reason: 'query_rejected', dataset_id: datasetId },
+          { cause: err },
+        );
+      }
+      return notFound(
+        `${domain} refused dataset ${datasetId} with HTTP 403 and a gateway page although the Discovery catalog lists it there: the host is not serving the SODA API to this server.`,
+        { ...err.data, reason: 'unknown_domain', dataset_id: datasetId },
+        { cause: err },
+      );
+    }
+    return notFound(
+      refused
+        ? `Dataset ${datasetId} not found on ${domain}: the host answered HTTP 403 with a gateway page instead of a Socrata error.`
+        : `Dataset ${datasetId} not found on ${domain}.`,
+      {
+        ...err.data,
+        domain,
+        dataset_id: datasetId,
+        ...(foundOn && !onThisPortal ? { found_on_domain: foundOn } : {}),
+      },
+      { cause: err },
+    );
+  }
+
+  /**
+   * One best-effort side request on a call that has already failed: a single
+   * attempt outside `withRetry`, bounded by `min(capMs, the call's remaining
+   * deadline)` and skipped when nothing is left. `read` turns the response
+   * into the result. Any failure — the bound, a network error, `read`
+   * throwing — resolves `undefined`, logged at debug as `failure`, so the
+   * caller's original error stands; the caller's cancellation is rethrown.
+   */
+  private async sideRequest<R>(
+    url: string,
+    capMs: number,
+    ctx: Context,
+    read: (response: Response) => Promise<R | undefined>,
+    failure: { message: string; datasetId: string },
+  ): Promise<R | undefined> {
+    const boundMs = Math.min(capMs, this.remainingMs(ctx));
     if (boundMs === 0) return;
     // A manual timer rather than AbortSignal.timeout: fake timers drive it in tests.
     const bound = new AbortController();
     const timer = setTimeout(() => bound.abort(), boundMs);
     try {
-      const params = new URLSearchParams({ ids: datasetId, limit: '1' });
-      const response = await fetch(`${DISCOVERY_BASE}?${params.toString()}`, {
+      const response = await fetch(url, {
         headers: this.buildHeaders(),
-        signal: AbortSignal.any([bound.signal, ctx.signal]),
+        signal: AbortSignal.any([ctx.signal, bound.signal]),
       });
       ctx.signal.throwIfAborted();
-      if (!response.ok) return;
-      const raw = (await response.json()) as {
-        results?: { resource?: Record<string, unknown>; metadata?: { domain?: unknown } }[];
-      };
+      const result = await read(response);
       ctx.signal.throwIfAborted();
-      const record = raw.results?.[0];
-      if (!record) return;
-      const domain = nonBlankString(record.metadata?.domain);
-      const assetType = nonBlankString(record.resource?.type);
-      const parentDatasetIds = catalogParentIds(record.resource?.parent_fxf);
-      return {
-        ...(domain ? { domain } : {}),
-        ...(assetType ? { assetType } : {}),
-        ...(parentDatasetIds ? { parentDatasetIds } : {}),
-      };
+      return result;
     } catch (err) {
       ctx.signal.throwIfAborted();
-      ctx.log.debug('Discovery dataset-ID lookup failed', { datasetId, error: String(err) });
+      ctx.log.debug(failure.message, { datasetId: failure.datasetId, error: String(err) });
       return;
     } finally {
       clearTimeout(timer);
     }
   }
 
+  /** A failed diagnostic is inconclusive; only a successful row array proves query sensitivity. */
+  private async acceptsBareRows(domain: string, datasetId: string, ctx: Context): Promise<boolean> {
+    const url = new URL(`https://${domain}/resource/${datasetId}.json`);
+    url.searchParams.set('$limit', '1');
+    const accepted = await this.sideRequest(
+      url.toString(),
+      QUERY_DIAGNOSTIC_TIMEOUT_MS,
+      ctx,
+      async (response) => response.ok && ROW_ARRAY.matches(parseJsonBody(await response.text())),
+      { message: 'Bare-row gateway diagnostic was inconclusive', datasetId },
+    );
+    return accepted ?? false;
+  }
+
   /**
-   * The not_tabular failure of a 2xx row answer with no fields — a map,
-   * chart, calendar, or visualization. One {@link lookupCatalogRecord} adds
-   * the asset type and the IDs of the tables it is built from, when the
-   * catalog lists them; without them the failure stands as it is.
+   * The SODA type of every field of a dataset — also its SoQL cast name — from
+   * one bare `$limit=0` row request's `X-SODA2-Fields` / `X-SODA2-Types`
+   * headers ({@link parseFieldTypes}). The request carries no clauses, so a
+   * query the portal rejected cannot fail it. Undefined when it fails, or its
+   * headers are missing or unpaired.
    */
-  private async fieldlessAssetError(
+  private readFieldTypes(
+    domain: string,
+    datasetId: string,
+    ctx: Context,
+  ): Promise<Map<string, string> | undefined> {
+    const url = new URL(`https://${domain}/resource/${datasetId}.json`);
+    url.searchParams.set('$limit', '0');
+    return this.sideRequest(
+      url.toString(),
+      FIELD_TYPE_READ_TIMEOUT_MS,
+      ctx,
+      async (response) => {
+        if (!response.ok) return;
+        const fieldTypes = parseFieldTypes(response.headers);
+        // The headers are the answer; the `[]` body is released unread.
+        await response.body?.cancel();
+        return fieldTypes;
+      },
+      { message: 'Field-type read failed', datasetId },
+    );
+  }
+
+  /**
+   * Best-effort Discovery `?ids=` lookup of the catalog record for a dataset
+   * ID: the portal that catalogs it, its asset type, and the assets it is
+   * built from. One {@link sideRequest} under {@link DISCOVERY_LOOKUP_TIMEOUT_MS};
+   * any failure (timeout, 429, 5xx, malformed body, network) resolves
+   * `undefined` so the caller's original failure stands unchanged. The
+   * caller's cancellation is rethrown.
+   */
+  private lookupCatalogRecord(datasetId: string, ctx: Context): Promise<CatalogRecord | undefined> {
+    const params = new URLSearchParams({ ids: datasetId, limit: '1' });
+    return this.sideRequest(
+      `${DISCOVERY_BASE}?${params.toString()}`,
+      DISCOVERY_LOOKUP_TIMEOUT_MS,
+      ctx,
+      async (response) => {
+        if (!response.ok) return;
+        const raw = (await response.json()) as {
+          results?: { resource?: Record<string, unknown>; metadata?: { domain?: unknown } }[];
+        };
+        const record = raw.results?.[0];
+        if (!record) return;
+        const domain = nonBlankString(record.metadata?.domain);
+        const assetType = nonBlankString(record.resource?.type);
+        const parentDatasetIds = catalogParentIds(record.resource?.parent_fxf);
+        return {
+          ...(domain ? { domain } : {}),
+          ...(assetType ? { assetType } : {}),
+          ...(parentDatasetIds ? { parentDatasetIds } : {}),
+        };
+      },
+      { message: 'Discovery dataset-ID lookup failed', datasetId },
+    );
+  }
+
+  /**
+   * The `not_tabular` failure of an asset without queryable rows: a 2xx row
+   * answer with no fields (a map, chart, calendar, or visualization), or
+   * `refusal`, SODA's non-tabular 403 (a story, measure, file, or link),
+   * whose `host` and `status` it keeps. One {@link lookupCatalogRecord} adds
+   * the asset type and the IDs of the tables the asset is built from, when the
+   * catalog lists them; without them the failure names the ID and host alone.
+   * The refused request is never repeated.
+   */
+  private async nonTabularAssetError(
     host: string,
     datasetId: string,
     ctx: Context,
+    refusal?: McpError,
   ): Promise<McpError> {
     const record = await this.lookupCatalogRecord(datasetId, ctx);
     ctx.signal.throwIfAborted();
     const assetType = record?.assetType;
+    const [answer, typical] = refusal
+      ? ['SODA refused row access', 'a story, file, link']
+      : ['SODA answered with no fields', 'a map, chart'];
     return validationError(
-      `${datasetId} on ${host} has no queryable rows: SODA answered with no fields${assetType ? `, and the Discovery catalog lists its asset type as ${assetType}` : ', as it does for a map, chart, or other non-tabular asset'}.`,
+      `${datasetId} on ${host} has no queryable rows: ${answer}${assetType ? `, and the Discovery catalog lists its asset type as ${assetType}` : `, as it does for ${typical}, or other non-tabular asset`}.`,
       {
+        ...refusal?.data,
         host,
         reason: 'not_tabular',
         dataset_id: datasetId,
         ...(assetType ? { asset_type: assetType } : {}),
         ...(record?.parentDatasetIds ? { parent_dataset_ids: record.parentDatasetIds } : {}),
       },
+      refusal ? { cause: refusal } : undefined,
+    );
+  }
+
+  /**
+   * A row query's `soql_error` with the columns its fix turns on, from one
+   * {@link readFieldTypes}: on a type mismatch, the fields the select, where,
+   * group, having, and order clauses name, with their SODA types
+   * (`data.referenced_columns`); on an unknown column upstream names
+   * (`data.column`), the field names that resemble it (`data.similar_columns`).
+   * Any other code makes no request. When the read fails or nothing matches,
+   * the error stands as it is.
+   */
+  private async soqlErrorWithColumns(
+    err: McpError,
+    domain: string,
+    datasetId: string,
+    query: QueryDatasetOptions,
+    ctx: Context,
+  ): Promise<McpError> {
+    const { socrataCode, column } = err.data ?? {};
+    const unknownColumn =
+      socrataCode === 'query.soql.no-such-column' && typeof column === 'string'
+        ? column
+        : undefined;
+    if (socrataCode !== 'query.soql.type-mismatch' && unknownColumn === undefined) return err;
+    const fieldTypes = await this.readFieldTypes(domain, datasetId, ctx);
+    if (!fieldTypes) return err;
+    const columns =
+      unknownColumn === undefined
+        ? referencedColumns(
+            [query.select, query.where, query.group, query.having, query.order],
+            fieldTypes,
+          )
+        : similarColumns(unknownColumn, fieldTypes.keys());
+    if (columns.length === 0) return err;
+    return validationError(
+      err.message,
+      {
+        ...err.data,
+        [unknownColumn === undefined ? 'referenced_columns' : 'similar_columns']: columns,
+      },
+      { cause: err },
     );
   }
 
@@ -1042,6 +1190,8 @@ export class SocrataService {
 
     return {
       datasetId,
+      // datasetMetadata() accepted it, so a differing `id` is a four-by-four from this host.
+      ...(raw.id !== datasetId ? { canonicalDatasetId: String(raw.id) } : {}),
       domain: host,
       name: String(raw.name ?? ''),
       ...(assetType ? { assetType } : {}),
@@ -1106,7 +1256,7 @@ export class SocrataService {
       opts.datasetId,
       ctx,
       ROW_ARRAY,
-      [...params.keys()].some((key) => key !== '$limit' && key !== '$offset'),
+      opts,
     );
 
     // A map, chart, calendar, or visualization answers with one `{}` per row
@@ -1115,7 +1265,7 @@ export class SocrataService {
     // not the empty rows, is the signal — checked before the recount and the
     // staging copy would treat those objects as matching rows.
     if (sodaFields(headers)?.length === 0) {
-      throw await this.fieldlessAssetError(host, opts.datasetId, ctx);
+      throw await this.nonTabularAssetError(host, opts.datasetId, ctx);
     }
 
     // Count the matching rows when the page cannot tell: it filled the limit

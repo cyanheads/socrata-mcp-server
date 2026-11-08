@@ -5,7 +5,12 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { CanvasIdSchema, type DataCanvas, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
+import {
+  CanvasIdSchema,
+  type DataCanvas,
+  DUCKDB_ERROR_REASONS,
+  SQL_GATE_REASONS,
+} from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { cappedLimit } from '@/mcp-server/tools/capped-limit.js';
 import { codeEcho } from '@/mcp-server/tools/code-echo.js';
@@ -51,14 +56,18 @@ function truncationNotice(requested: number, served: number): string {
 }
 
 /**
- * DuckDB read-only SQL-gate rejection reasons that map to this tool's declared
- * `sql_rejected` contract. The gate (in `@cyanheads/mcp-ts-core`'s DuckdbProvider)
- * throws these as plain `ValidationError`s with `data.reason` set but no recovery
- * hint — it is a framework-internal validator with no access to this tool's
- * contract — so the handler re-throws them via `ctx.fail('sql_rejected', …)`.
- * `invalid_sql` (a SELECT that parses but fails to prepare — a column/function
- * typo) and `missing_table` (a NotFound, handled separately) are deliberately
- * excluded: they are distinct failure surfaces that bubble on their own reasons.
+ * Canvas SQL-gate refusals that map to this tool's declared `sql_rejected`
+ * contract: a statement that is not one SELECT, names a system catalog, calls a
+ * disallowed function, plans a disallowed operator, or names a file (`'x.csv'`
+ * read as a table is `sql_read_only`, whether or not the file exists). The gate
+ * in `@cyanheads/mcp-ts-core`'s DuckdbProvider throws each as a `ValidationError`
+ * carrying its own `data.reason` and `data.recovery.hint`; the handler re-throws
+ * it via `ctx.fail('sql_rejected', …)` so callers branch on one reason, keeping
+ * the gate's reason as `gateReason` and its hint, which wins over the contract's.
+ * `invalid_sql` (a read that fails to parse or prepare — a column or function
+ * typo), `sql_execution_error` (a SELECT that fails while it runs), and
+ * `missing_table` (a NotFound, handled separately) are distinct failure surfaces
+ * that keep their own reasons.
  */
 const SQL_GATE_REJECTION_REASONS: ReadonlySet<string> = new Set([
   SQL_GATE_REASONS.nonSelectStatement,
@@ -67,6 +76,7 @@ const SQL_GATE_REJECTION_REASONS: ReadonlySet<string> = new Set([
   SQL_GATE_REASONS.deniedFunction,
   SQL_GATE_REASONS.deniedFunctionInPlan,
   SQL_GATE_REASONS.planOperatorNotAllowed,
+  DUCKDB_ERROR_REASONS.sqlReadOnly,
 ]);
 
 export const dataframeQuery = tool('socrata_dataframe_query', {
@@ -81,7 +91,7 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     sql: z
       .string()
       .describe(
-        'SELECT-only SQL to run against registered canvas tables. DDL, DML, and file-reading functions are rejected. Use table names from socrata_dataframe_describe.',
+        'SELECT-only SQL to run against registered canvas tables. DDL, DML, file paths, file-reading functions, and any name spelled like a DuckDB metadata view (pg_type, duckdb_tables, sqlite_master), even as a column alias or CTE name, are rejected. Use table names from socrata_dataframe_describe.',
       ),
     limit: cappedLimit({
       cap: QUERY_LIMIT_CAP,
@@ -145,9 +155,25 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
     {
       reason: 'sql_rejected',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SQL was not a SELECT statement, referenced a system catalog, or contained disallowed functions.',
+      when: "SQL was not a single SELECT statement, named a file or a system catalog (a column alias or CTE spelled like a DuckDB metadata view counts), or contained disallowed functions or operators. data.gateReason carries the canvas gate's own reason.",
       recovery:
-        'Only SELECT statements against registered tables are allowed. Remove DDL, DML, file-reading functions (read_csv, read_parquet), PRAGMA statements, and system catalog references (information_schema, pg_catalog, sqlite_master, duckdb_*). Use socrata_dataframe_describe to list tables and schemas.',
+        'Only SELECT statements against registered tables are allowed. Remove DDL, DML, file paths and file-reading functions (read_csv, read_parquet), PRAGMA statements, and system catalog references (information_schema, pg_catalog, sqlite_master, duckdb_*), and rename any column alias or CTE spelled like a metadata view (pg_type, duckdb_tables). Use socrata_dataframe_describe to list tables and schemas.',
+    },
+    {
+      reason: 'invalid_sql',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A SELECT failed to parse or prepare: a syntax error, or a column, function, or type the canvas does not have. data.binderMessage carries the engine detail.',
+      recovery:
+        'Correct the syntax, column, or function the message names; list the staged columns with socrata_dataframe_describe.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'sql_execution_error',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A SELECT prepared but failed while it ran over the staged rows: a failed CAST, an out-of-range value, or a function argument rejected at run time (a zero step in range).',
+      recovery:
+        'Wrap the conversion in TRY_CAST, filter out the rows the message names, or correct the function argument it names.',
+      thrownBy: 'service',
     },
   ],
 
@@ -185,11 +211,11 @@ export const dataframeQuery = tool('socrata_dataframe_query', {
         signal: ctx.signal,
       });
     } catch (err) {
-      // The read-only SQL gate rejects before any DuckDB execution and throws a
-      // plain ValidationError/NotFound carrying data.reason but no recovery hint.
-      // Re-throw gate rejections and missing-table errors through this tool's
-      // declared contract so the recovery hint reaches the wire (mirrors the
-      // canvas_not_found rewrap at the acquire() call above).
+      // Re-throw gate refusals and missing-table errors through this tool's
+      // declared contract, so callers see this tool's reasons (mirrors the
+      // canvas_not_found rewrap at the acquire() call above). A refusal keeps
+      // the gate's own recovery hint; a missing table takes the contract's,
+      // which names this server's describe tool.
       if (err instanceof McpError) {
         const data = (err.data ?? {}) as Record<string, unknown>;
         const reason = data.reason;

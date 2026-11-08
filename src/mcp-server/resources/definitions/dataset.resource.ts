@@ -26,7 +26,13 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
     ),
   }),
   output: z.object({
-    dataset_id: z.string().describe('Four-by-four Socrata dataset ID.'),
+    dataset_id: z.string().describe('Four-by-four Socrata dataset ID, as requested.'),
+    canonical_dataset_id: z
+      .string()
+      .optional()
+      .describe(
+        "The portal record's own ID, present only when the requested ID is an alias for it. The columns describe the requested ID's rows, which can differ from this ID's.",
+      ),
     domain: z.string().describe('Portal domain hosting the dataset.'),
     name: z.string().describe('Dataset display name.'),
     asset_type: AssetTypeSchema,
@@ -67,12 +73,14 @@ export const datasetResource = resource('socrata://datasets/{domain}/{datasetId}
     });
 
     const svc = getSocrataService();
-    // getDataset rejects a views answer that is not this dataset, so the
-    // resource and socrata_get_dataset classify the same responses alike.
+    // getDataset decides which views answers are this dataset (an alias ID's
+    // same-host record included), so the resource and socrata_get_dataset
+    // classify the same responses alike.
     const meta = await svc.getDataset(params.domain, params.datasetId, ctx);
 
     return {
       dataset_id: meta.datasetId,
+      ...(meta.canonicalDatasetId ? { canonical_dataset_id: meta.canonicalDatasetId } : {}),
       domain: meta.domain,
       name: meta.name,
       ...(meta.assetType ? { asset_type: meta.assetType } : {}),

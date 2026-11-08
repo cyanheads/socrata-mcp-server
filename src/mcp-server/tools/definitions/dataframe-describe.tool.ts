@@ -104,7 +104,7 @@ export const dataframeDescribe = tool('socrata_dataframe_describe', {
       }
       throw err;
     }
-    const tableInfos = await instance.describe();
+    const tableInfos = await instance.describe({ signal: ctx.signal });
 
     if (tableInfos.length === 0) {
       ctx.enrich.notice(

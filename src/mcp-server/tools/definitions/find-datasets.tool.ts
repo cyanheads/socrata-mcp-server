@@ -70,7 +70,7 @@ const DatasetResultSchema = z
     column_names: z
       .array(z.string())
       .describe(
-        'API field names — the identifiers SoQL takes in select/where/group/order (e.g. cuisine_description), not display labels. Computed-region system columns are dropped; empty when the catalog lists no field names. No type info — call socrata_get_dataset for the typed schema.',
+        'API field names — the identifiers SoQL takes in select/where/group/order (e.g. cuisine_description), not display labels. Computed-region system columns are dropped; empty when the catalog lists no field names. A catalog-listed subcolumn can be missing from the row endpoint, which drops it from a select without an error; confirm columns with socrata_get_dataset. No type info — call socrata_get_dataset for the typed schema.',
       ),
     license: z.string().optional().describe('Dataset license when available.'),
     data_updated_at: z

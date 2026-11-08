@@ -88,6 +88,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 ### `socrata_get_dataset` <sub>tool</sub>
 
 - Returns field names, Socrata data types, descriptions, row count (with `row_count_source` provenance), licensing, and `asset_type` (`dataset`, `filter`, `map`, …) when available; only `dataset` and `filter` answer `socrata_query_dataset` with rows
+- `dataset_id` is always the ID requested; when it is an alias the portal answers with another dataset's record, `canonical_dataset_id` names that record's ID, and the columns are still the ones the requested ID's rows carry
 - Column `data_type` determines WHERE clause syntax: `Number` → bare literals (`year=2023`), `Text` → single-quoted strings (`year='2023'`)
 - Excludes computed region columns (`:@computed_region_*`) to reduce noise; includes per-column non-null counts when available
 - Dataset IDs are portal-scoped — pass the `domain` from the same `socrata_find_datasets` result; URL-form domains are reduced to the host. `dataset_id` takes either letter case and is sent lowercased; a malformed ID fails argument validation before any request
@@ -100,7 +101,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 - `search` for quick full-text lookup (`$q`), or combine `select`/`where`/`group`/`having`/`order` for full analytical control — clauses reference columns by API field name (`field_name` from `socrata_get_dataset`), never the display label; operators `=`, `!=`, `>`, `<`, `LIKE`, `IN(...)`, `BETWEEN`, `IS NULL`, `starts_with()`, `contains()`, `AND`, `OR`, `NOT`
 - Aggregation via `count(*)`, `sum()`, `avg()`, `min()`, `max()` with `group`/`having`
-- `not_tabular` identifies assets without queryable rows: SODA refuses row access (stories, measures, files, external links), or answers with no fields (maps, charts, calendars, visualizations), which fails before any recount or staging. For the second kind the recovery names the tables the asset is built on (`a7mk-8suc is a map built on t6tk-mr48; query that dataset_id on data.nj.gov.`), with `asset_type` and `parent_dataset_ids` in the error data; without a listed parent, search with `only: "datasets"`. `query_rejected` identifies a gateway refusal of query clauses when a bare row request succeeds; simplify the query and use SoQL `case(condition, value, true, fallback)` for conditional aggregates.
+- `not_tabular` identifies assets without queryable rows: SODA refuses row access (stories, measures, files, external links), or answers with no fields (maps, charts, calendars, visualizations), which fails before any recount or staging. For either kind the recovery names the tables the asset is built on (`a7mk-8suc is a map built on t6tk-mr48; query that dataset_id on data.nj.gov.`, `9hpx-asd8 is a story built on e52k-ymww; query that dataset_id on data.ny.gov.`), with `dataset_id`, `asset_type`, and `parent_dataset_ids` in the error data; without a listed parent, search with `only: "datasets"`. `query_rejected` identifies a gateway refusal of query clauses when a bare row request succeeds; simplify the query and use SoQL `case(condition, value, true, fallback)` for conditional aggregates.
 - `limit` up to 50,000 with `SOCRATA_CLAMP_LIMITS` on, but one call returns at most 5,000 rows: a larger `limit` is served as 5,000, with a notice naming the offset that continues when more rows match (off, the schema maximum is 5,000). Page with `offset`
 - `total_count` counts the query as written — groups for a grouped query, distinct values for a distinct select — through a bounded SoQL `$query` pipe recount. It is present when the match holds more rows than the response, and absent when the response holds the whole match or when the recount failed or ran past 15 seconds. `truncated` is set only when `total_count` exceeds `offset + row_count`, or when the page fills `limit` and no count exists
 - An empty page at `offset > 0` gets a past-the-end notice naming the match size, or a may-be-past-the-end notice when the count failed
@@ -109,7 +110,7 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 - `stage: false` returns the page alone: no staging request and no canvas, with the rows, counts, and paging notice a server without a canvas returns. A `canvas_id` or `table_name` sent with it goes unused, and the notice names it. On a server without a canvas, `stage` changes nothing
 - `table_name` names the staged table (default derived from `dataset_id`, e.g. `ijzp_q8t2_rows`). Spilling under a name the canvas already holds replaces that table, and the notice reports the replacement; pass a distinct `table_name` with the same `canvas_id` to keep several filtered extracts of one dataset side by side. When a named call stages nothing because the whole match fits the page, or the server has no canvas, the notice says so; a `limit` below the page's row count stages a match that fits
 - Every request of a call shares one 50-second deadline, retries and backoffs included
-- Typed errors: `not_tabular`, `query_rejected`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; the recovery hint matches the code: API field names for a parse error, both fixes for an unknown identifier, the quoting rule for a type mismatch), `rate_limited` (retryable; honors the upstream `Retry-After`), `retry_deadline_exceeded` (retryable; the call passed its 50-second deadline)
+- Typed errors: `not_tabular`, `query_rejected`, `not_found` (names the ID, the domain queried, and the portal holding the ID when known), `unknown_domain`, `invalid_domain`, `soql_error` (bad SoQL, unknown column or function, or type mismatch — carries the upstream `socrataCode` and, when upstream names it, the offending `column`; a type mismatch adds `referenced_columns`, the fields the query names with their types, and an unknown column `similar_columns`, from one bare row request; the recovery hint matches the code: API field names for a parse error, the similar field names or both fixes for an unknown identifier, the column types, quoting rule, and casts such as `district::number` for a type mismatch, the SoQL function list for an unknown function), `rate_limited` (retryable; honors the upstream `Retry-After`), `retry_deadline_exceeded` (retryable; the call passed its 50-second deadline)
 
 ---
 
@@ -123,11 +124,11 @@ All resource data is also reachable via tools. Use the corresponding tool for ag
 
 ### `socrata_dataframe_query` <sub>tool</sub>
 
-- SELECT-only SQL against a `canvas_id` table staged by `socrata_query_dataset`; DDL, DML, file references, file-reading functions, and engine-setting functions (`current_schema`, `current_setting`) are rejected. Use direct table references instead of `query_table`; `query()` accepts only a single SQL string literal. Qualify a staged column named `current_schema` with its table (`t.current_schema`).
+- SELECT-only SQL against a `canvas_id` table staged by `socrata_query_dataset`; DDL, DML, file references, file-reading functions, engine-setting functions (`current_schema`, `current_setting`), and any name spelled like a DuckDB metadata view (`pg_type`, `duckdb_tables`, `sqlite_master`), even as a column alias or CTE name, are rejected. Use direct table references instead of `query_table`; `query()` accepts only a single SQL string literal. Qualify a staged column named `current_schema` with its table (`t.current_schema`).
 - Spilled columns are typed from the SODA response headers: `number` columns (aggregate aliases included) are `DOUBLE`, so numeric comparisons work without a cast (`year > 2020`, `amount < 500`); text and timestamp columns stay `VARCHAR` — compare times with `CAST(date AS TIMESTAMP)`
 - `limit` up to 50,000 with `SOCRATA_CLAMP_LIMITS` on (default 1000), but one call returns at most 10,000 rows: a larger `limit` is served as 10,000. When more rows match, the notice gives the paging recipe — `ORDER BY` a unique column with `LIMIT`/`OFFSET` in the SQL. With the switch off, the schema maximum is 10,000
 - `content[]` shows the `**SQL:**` echo as a code span, or as a fenced `sql` block when the SQL spans lines; `structuredContent` carries it unchanged
-- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE=none`), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, system catalog access, or a denied function)
+- Typed errors: `canvas_disabled` (`CANVAS_PROVIDER_TYPE=none`), `canvas_not_found`, `table_not_found`, `sql_rejected` (non-SELECT, a file or system catalog reference — a column alias or CTE named like a metadata view counts — or a denied function or operator), `invalid_sql` (a syntax error or an unknown column or function), `sql_execution_error` (a SELECT that fails on the staged rows, such as a failed `CAST`)
 - Works out of the box — DuckDB ships as a regular dependency and is enabled by default; `CANVAS_PROVIDER_TYPE=none` disables it
 
 ---
@@ -180,7 +181,7 @@ Agent-friendly output:
 - Assembled SoQL string echoed in every `socrata_query_dataset` response so agents can learn and refine syntax
 - Recovery hints on empty results — echoes applied filters with specific suggestions for broadening
 - Truncation disclosure — `truncated`/`shown`/`cap` fields when more rows match past the page, with guidance to page or raise the limit, naming the staged table and both dataframe tools when the result spilled
-- Typed error reasons across every tool (`not_found`, `not_tabular`, `query_rejected`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `retry_deadline_exceeded`, `result_window_exceeded`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `canvas_disabled`) with actionable recovery text
+- Typed error reasons across every tool (`not_found`, `not_tabular`, `query_rejected`, `unknown_domain`, `invalid_domain`, `soql_error`, `rate_limited`, `retry_deadline_exceeded`, `result_window_exceeded`, `canvas_id_required`, `canvas_not_found`, `table_not_found`, `sql_rejected`, `invalid_sql`, `sql_execution_error`, `canvas_disabled`) with actionable recovery text
 
 ## Getting started
 
@@ -236,7 +237,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ## Running the server
 
-Requires [Bun v1.4.0+](https://bun.sh/) or Node.js v24+.
+Requires [Bun v1.4.4+](https://bun.sh/) or Node.js v24+.
 
 ```sh
 git clone https://github.com/cyanheads/socrata-mcp-server.git

@@ -171,16 +171,18 @@ describe('dataframeQuery', () => {
     } as unknown as DataCanvas;
   }
 
-  it('re-throws a non-SELECT SQL-gate rejection as sql_rejected with a recovery hint (#22)', async () => {
-    // Exactly the repro: the gate throws before DuckDB executes, ValidationError
-    // with data.reason: 'non_select_statement' and no recovery hint.
+  it('re-throws a non-SELECT SQL-gate rejection as sql_rejected, keeping the gate hint (#22)', async () => {
+    // The gate refuses before DuckDB prepares the statement: one refusal for
+    // every non-SELECT, statementType 'UNKNOWN', with the gate's own hint.
+    const gateHint =
+      'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.';
     setCanvas(
       canvasWhereQueryRejects(
-        new McpError(
-          JsonRpcErrorCode.ValidationError,
-          'Canvas query must be SELECT; got DELETE. Mutations must use registerTable, drop, or clear.',
-          { reason: 'non_select_statement', statementType: 'DELETE' },
-        ),
+        new McpError(JsonRpcErrorCode.ValidationError, 'Canvas query must be SELECT.', {
+          reason: 'non_select_statement',
+          statementType: 'UNKNOWN',
+          recovery: { hint: gateHint },
+        }),
       ),
     );
     const error = await contractError({
@@ -194,8 +196,8 @@ describe('dataframeQuery', () => {
         reason: 'sql_rejected',
         // The original gate reason is preserved as diagnostic context, not clobbered.
         gateReason: 'non_select_statement',
-        statementType: 'DELETE',
-        recovery: { hint: expect.stringContaining('SELECT') },
+        statementType: 'UNKNOWN',
+        recovery: { hint: gateHint },
       },
     });
   });
@@ -246,6 +248,34 @@ describe('dataframeQuery', () => {
       data: { reason: 'invalid_sql' },
     });
   });
+
+  it.each([
+    [
+      'invalid_sql',
+      'Canvas query failed to prepare: Referenced column "nope" not found.',
+      'socrata_dataframe_describe',
+    ],
+    [
+      'sql_execution_error',
+      "Canvas query failed: Conversion Error: Could not convert string 'a' to INT32",
+      'TRY_CAST',
+    ],
+  ])(
+    'declares %s: one raised without a hint carries the declared recovery',
+    async (reason, message, hintPart) => {
+      setCanvas(
+        canvasWhereQueryRejects(
+          new McpError(JsonRpcErrorCode.ValidationError, message, { reason }),
+        ),
+      );
+      const error = await contractError({ canvas_id: 'abc1234567', sql: 'SELECT nope FROM t' });
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason, recovery: { hint: expect.stringContaining(hintPart) } },
+      });
+    },
+  );
 
   it('re-throws a missing_table NotFound as table_not_found with a recovery hint (#22)', async () => {
     setCanvas(
@@ -335,7 +365,9 @@ describe('dataframeQuery', () => {
 
   it('escapes upstream row values and column keys in table mode', () => {
     const output = {
-      rows: [{ 'weird|key': 'pipe|value', note: 'line1\nline2', slash: 'a\\|b' }],
+      rows: [
+        { 'weird|key': 'pipe|value', note: 'line1\nline2', slash: 'a\\|b', 'two\r\nlines': 'v' },
+      ],
       row_count: 1,
       sql: 'SELECT * FROM t',
       canvas_id: 'abc1234567',
@@ -345,8 +377,10 @@ describe('dataframeQuery', () => {
     expect(text).toContain('weird\\|key');
     expect(text).toContain('pipe\\|value');
     expect(text).not.toMatch(/\n\| [^|\\]*pipe\|value/);
-    expect(text).toContain('line1 line2');
     expect(text).toContain('a\\\\\\|b');
+    // A line break in a column key or a value renders as its references, so each row stays one line (#71).
+    expect(text).toContain('\n| weird\\|key | note | slash | two&#13;&#10;lines |\n');
+    expect(text).toContain('\n| pipe\\|value | line1&#10;line2 | a\\\\\\|b | v |');
   });
 
   it('sizes wide-mode fences past embedded backtick runs', () => {
@@ -688,6 +722,31 @@ describe('dataframeQuery over a real DuckDB canvas (#55, #60)', () => {
     expect(seen.map((row) => row.grp as number).sort(byValue)).toEqual([...GROUPS].sort(byValue));
     expect(sc.notice).toContain('ORDER BY ALL when none is unique');
   });
+
+  it.each([
+    ['a file path that does not exist', "SELECT * FROM 'missing.csv'", 'missing.csv'],
+    ['a path with a directory', "SELECT * FROM 'exports/rows.parquet'", 'exports/rows.parquet'],
+    ['a quoted name holding a path separator', 'SELECT * FROM "big/rows"', 'big/rows'],
+  ])(
+    'refuses %s as sql_rejected, keeping the gate reason and its hint',
+    async (_label, sql, path) => {
+      // The gate refuses a statement naming a file as sql_read_only, whether or
+      // not the file exists: never a missing table to re-stage.
+      const result = await runToolContract(def, { canvas_id: canvasId, sql });
+
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: unknown }).error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining(`"${path}" names a file, not a staged table.`),
+        data: {
+          reason: 'sql_rejected',
+          gateReason: 'sql_read_only',
+          recovery: { hint: expect.stringContaining('This surface reads no files') },
+        },
+      });
+      expect(contentText(result)).toContain('reason sql_rejected');
+    },
+  );
 
   it.each([
     ["SELECT 'a`b' AS x", [{ x: 'a`b' }]],

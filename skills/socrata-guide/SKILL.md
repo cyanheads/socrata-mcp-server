@@ -4,12 +4,12 @@ description: Investigate civic data with socrata_* tools, check dataset coverage
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0.2"
+  version: "1.0.3"
 ---
 
 ## Scope
 
-Use Socrata for public government datasets served through SODA 2.1. Discovery also lists maps, charts, files, stories, and external links; each search result's `asset_type` says which it is, and only `dataset` and `filter` assets answer with rows. For row analysis of a map or chart, query a table its `parent_dataset_ids` names. The tools do not edit portal data.
+Use Socrata for public government datasets served through SODA 2.1. Discovery also lists maps, charts, files, stories, and external links; each search result's `asset_type` says which it is, and only `dataset` and `filter` assets answer with rows. For row analysis of a map, chart, or story, query a table its `parent_dataset_ids` names; a `not_tabular` error names them too. The tools do not edit portal data.
 
 ## Identifiers
 

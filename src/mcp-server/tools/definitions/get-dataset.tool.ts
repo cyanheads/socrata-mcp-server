@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { AssetTypeSchema } from '@/mcp-server/asset-type-schema.js';
 import { DatasetIdSchema } from '@/mcp-server/dataset-id-schema.js';
@@ -34,7 +34,15 @@ export const getDataset = tool('socrata_get_dataset', {
     ),
   }),
   output: z.object({
-    dataset_id: z.string().describe('Four-by-four dataset ID.'),
+    dataset_id: z
+      .string()
+      .describe('Four-by-four dataset ID, as requested. Query the dataset with this ID.'),
+    canonical_dataset_id: z
+      .string()
+      .optional()
+      .describe(
+        "The portal record's own ID, present only when the requested ID is an alias for it. The columns describe the requested ID's rows, which can differ from this ID's.",
+      ),
     domain: z.string().describe('Portal domain hosting this dataset.'),
     name: z.string().describe('Dataset display name.'),
     asset_type: AssetTypeSchema,
@@ -159,6 +167,7 @@ export const getDataset = tool('socrata_get_dataset', {
 
     return {
       dataset_id: meta.datasetId,
+      ...(meta.canonicalDatasetId ? { canonical_dataset_id: meta.canonicalDatasetId } : {}),
       domain: meta.domain,
       name: meta.name,
       ...(meta.assetType ? { asset_type: meta.assetType } : {}),
@@ -182,11 +191,15 @@ export const getDataset = tool('socrata_get_dataset', {
     const lines: string[] = [];
     // Dataset name, description, and column descriptions are upstream-controlled —
     // render the name quoted on a single line, the description as a labeled
-    // blockquote, and table cells escaped for pipes and newlines.
+    // blockquote, and table cells escaped for pipes, with line breaks as &#10;/&#13;.
     lines.push(`## "${escapeMarkdownInline(inlineUpstream(result.name))}"`);
     const type =
       result.asset_type != null ? ` | **Type:** ${escapeMarkdownInline(result.asset_type)}` : '';
-    lines.push(`**ID:** ${result.dataset_id} | **Domain:** ${result.domain}${type}`);
+    const canonical =
+      result.canonical_dataset_id != null
+        ? ` | **Canonical ID:** ${result.canonical_dataset_id}`
+        : '';
+    lines.push(`**ID:** ${result.dataset_id} | **Domain:** ${result.domain}${type}${canonical}`);
     if (result.category) lines.push(`**Category:** ${escapeMarkdownInline(result.category)}`);
     if (result.tags.length)
       lines.push(`**Tags:** ${result.tags.map(escapeMarkdownInline).join(', ')}`);
@@ -209,9 +222,23 @@ export const getDataset = tool('socrata_get_dataset', {
       const desc = col.description ? escapeTableCell(col.description) : '';
       const nullInfo = col.non_null_count != null ? ` (${col.non_null_count} non-null)` : '';
       lines.push(
-        `| \`${escapeTableCell(col.field_name)}\` | ${escapeTableCell(col.data_type)}${nullInfo} | ${desc} |`,
+        `| ${fieldNameCell(col.field_name)} | ${escapeTableCell(col.data_type)}${nullInfo} | ${desc} |`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * A column's field name as a table cell that reads back as exactly the name:
+ * a code span, with `|` escaped as `\|` since a GFM row splits on pipes before
+ * any span forms. A code span reads a line break back as a space, and GFM
+ * parsers split `\\|` differently, so a name holding either is an escaped
+ * plain cell instead. The service falls back to the display label when a
+ * column has no `fieldName`, so the name can be any portal-written text.
+ */
+function fieldNameCell(name: string): string {
+  return /[\r\n]|\\\|/.test(name)
+    ? escapeTableCell(name)
+    : markdown().inlineCode(name.replaceAll('|', '\\|')).build();
+}

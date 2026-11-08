@@ -855,7 +855,7 @@ describe('upstream text framing in content[]', () => {
     expect(text).not.toContain('[truncated]');
   });
 
-  it('getDataset format collapses newlines in column-description table cells', () => {
+  it('getDataset format keeps column-description line breaks as references inside one table row', () => {
     const output = {
       dataset_id: 'kzjm-xkqj',
       domain: 'data.seattle.gov',
@@ -866,7 +866,7 @@ describe('upstream text framing in content[]', () => {
     const blocks = getDataset.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
 
-    expect(text).toContain('line1 line2 line3');
+    expect(text).toContain('line1&#10;line2&#13;&#10;line3');
     expect(text).not.toContain('line1\nline2');
   });
 
@@ -930,7 +930,7 @@ describe('upstream text framing in content[]', () => {
     expect(text).toMatch(/\n\n\*\*Columns \(field names\):\*\* id, date\n/);
   });
 
-  it('queryDataset format escapes pipes and newlines in row-value table cells', () => {
+  it('queryDataset format escapes pipes and keeps line breaks as references in row-value table cells', () => {
     const output = {
       rows: [{ id: '1', note: 'line1\nline2', label: 'a|b' }],
       row_count: 1,
@@ -941,7 +941,7 @@ describe('upstream text framing in content[]', () => {
     const blocks = queryDataset.format!(output);
     const text = (blocks[0] as { text?: string }).text ?? '';
 
-    expect(text).toContain('line1 line2');
+    expect(text).toContain('line1&#10;line2');
     expect(text).not.toContain('line1\nline2');
     expect(text).toContain('a\\|b');
   });

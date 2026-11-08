@@ -27,12 +27,23 @@ export function inlineUpstream(text: string, maxChars?: number): string {
 }
 
 /**
- * Escape upstream text for a markdown table cell: newlines collapse to spaces
- * (a raw newline ends the row), while Markdown punctuation and backslashes
- * that would escape it stay literal after parsing.
+ * Escape upstream text for a markdown table cell so a parse reads the cell back
+ * as `value`, line breaks included, with its row still on one line. Each line
+ * goes through `escapeMarkdownInline` on its own, the one-line value its
+ * table-cell guarantee covers, and each line break becomes the numeric
+ * references the cell decodes back to it (`&#10;`, `&#13;`, `&#13;&#10;`): a
+ * raw break, or the hard break `escapeMarkdownInline` writes for one, ends the
+ * row. A reference opens on `&` and closes on `;`, so the escaped lines on
+ * either side of it cannot form syntax together.
  */
 export function escapeTableCell(value: string): string {
-  return escapeMarkdownInline(value.replace(/\r\n|[\r\n]/g, ' '));
+  // A capturing split leaves each line at an even index and the break after it at the next.
+  return value
+    .split(/(\r\n?|\n)/)
+    .map((part, i) =>
+      i % 2 === 0 ? escapeMarkdownInline(part) : part.replace('\r', '&#13;').replace('\n', '&#10;'),
+    )
+    .join('');
 }
 
 /**

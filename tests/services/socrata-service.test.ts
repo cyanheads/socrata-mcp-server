@@ -23,6 +23,14 @@ import {
   resetPortalCountCache,
   SocrataService,
 } from '@/services/socrata/socrata-service.js';
+import {
+  IJZP_FIELDS,
+  IJZP_TYPES,
+  IPU4_FIELDS,
+  IPU4_TYPES,
+  noSuchColumn,
+  SOQL_400,
+} from './soql-captures.js';
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: vi.fn(),
@@ -151,7 +159,10 @@ describe('SocrataService.fetchJson error classification', () => {
     );
     expect(err.data).toMatchObject({ reason: 'not_tabular', status: 403 });
     expect(err.message).toContain('no queryable rows');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // The 403 is requested once; the one other request is the Discovery lookup (#74).
+    const sodaCalls = fetchSpy.mock.calls.filter((c) => originOf(c[0]) !== DISCOVERY_ORIGIN);
+    expect(sodaCalls).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it('maps a 400 query-coordinator body (errorCode key) to soql_error with the upstream message', async () => {
@@ -1185,6 +1196,242 @@ describe('SocrataService.queryDataset on an asset SODA answers with no fields (#
       expect(result.totalCount).toBe(1154);
       expect(discoveryCalls()).toHaveLength(0);
     });
+  });
+});
+
+describe('SocrataService.queryDataset on an asset SODA refuses row access (#74)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  /** SODA's non-tabular 403 as live for stories on data.ny.gov, data.wa.gov, and data.ct.gov (2026-11-08). */
+  const refusal = () =>
+    jsonResponse(
+      { error: true, message: 'no row or column access to non-tabular tables' },
+      403,
+      'Forbidden',
+    );
+
+  /** A story's Discovery `?ids=` record, with the type and `parent_fxf` captured live. */
+  const storyRecord = (id: string, domain: string, parents: string[]) =>
+    jsonResponse(
+      {
+        results: [
+          { resource: { id, name: 'X', type: 'story', parent_fxf: parents }, metadata: { domain } },
+        ],
+        resultSetSize: 1,
+      },
+      200,
+      'OK',
+    );
+
+  /** Every row request answers the 403; Discovery answers with `discovery`. */
+  function route(discovery: (input: unknown, init?: RequestInit) => Promise<Response>) {
+    fetchSpy.mockImplementation((input, init) =>
+      originOf(input) === DISCOVERY_ORIGIN ? discovery(input, init) : Promise.resolve(refusal()),
+    );
+  }
+
+  const sodaCalls = () => fetchSpy.mock.calls.filter((c) => originOf(c[0]) !== DISCOVERY_ORIGIN);
+  const discoveryCalls = () =>
+    fetchSpy.mock.calls.filter((c) => originOf(c[0]) === DISCOVERY_ORIGIN);
+
+  const STORY = { domain: 'data.ny.gov', datasetId: '9hpx-asd8', limit: 2 };
+
+  it.each([
+    ['9hpx-asd8', 'data.ny.gov', ['e52k-ymww']],
+    ['k356-mc56', 'data.wa.gov', ['qxh8-f4bd']],
+    [
+      'jixs-h7uw',
+      'datahub.transportation.gov',
+      ['ge9b-nbt9', '69qe-yiui', 'tnkn-dmxi', 'pm7p-zhna', 'b55b-fde7'],
+    ],
+  ])(
+    '%s on %s names the story and its parents in catalog order, requesting the 403 once',
+    async (datasetId, domain, parents) => {
+      route(() => Promise.resolve(storyRecord(datasetId, domain, parents)));
+
+      const err = await rejectionOf(
+        svc.queryDataset({ domain, datasetId, limit: 2 }, createMockContext()),
+      );
+
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toEqual({
+        host: domain,
+        status: 403,
+        reason: 'not_tabular',
+        dataset_id: datasetId,
+        asset_type: 'story',
+        parent_dataset_ids: parents,
+      });
+      expect(err.message).toBe(
+        `${datasetId} on ${domain} has no queryable rows: SODA refused row access, and the Discovery catalog lists its asset type as story.`,
+      );
+      expect(sodaCalls()).toHaveLength(1);
+      expect(discoveryCalls()).toHaveLength(1);
+      expect(new URL(String(discoveryCalls()[0]?.[0])).searchParams.get('ids')).toBe(datasetId);
+    },
+  );
+
+  it('names the type alone for a story whose record lists no parent (q5as-kyim)', async () => {
+    route(() => Promise.resolve(storyRecord('q5as-kyim', 'data.ct.gov', [])));
+
+    const err = await rejectionOf(
+      svc.queryDataset({ domain: 'data.ct.gov', datasetId: 'q5as-kyim' }, createMockContext()),
+    );
+
+    expect(err.data).toEqual({
+      host: 'data.ct.gov',
+      status: 403,
+      reason: 'not_tabular',
+      dataset_id: 'q5as-kyim',
+      asset_type: 'story',
+    });
+    expect(err.message).toContain('lists its asset type as story');
+  });
+
+  /** The failure when the lookup adds nothing: the ID and host, the 403's status, no type or parent. */
+  const unlisted = {
+    host: 'data.ny.gov',
+    status: 403,
+    reason: 'not_tabular',
+    dataset_id: '9hpx-asd8',
+  };
+
+  /** The story's catalog record as the lookup's body, on an answer whose status must still not count. */
+  const storyRecordWith = (status: number, statusText: string, headers?: Record<string, string>) =>
+    jsonResponse(
+      {
+        results: [
+          {
+            resource: { id: '9hpx-asd8', name: 'X', type: 'story', parent_fxf: ['e52k-ymww'] },
+            metadata: { domain: 'data.ny.gov' },
+          },
+        ],
+        resultSetSize: 1,
+      },
+      status,
+      statusText,
+      headers,
+    );
+
+  it.each([
+    ['a 404', () => jsonResponse({ error: 'Not found' }, 404, 'Not Found')],
+    ['the same 403', refusal],
+    ['a gateway 403', () => htmlResponse(403, 'Forbidden')],
+    ['a 429', () => jsonResponse({ message: 'slow' }, 429, 'Too Many Requests')],
+    ['a 5xx', () => new Response('oops', { status: 503, statusText: 'Service Unavailable' })],
+    ['a non-JSON body', () => new Response('<html>catalog</html>', { status: 200 })],
+    ['no record for the ID', () => jsonResponse({ results: [], resultSetSize: 0 }, 200, 'OK')],
+    ['a 422 whose body is the story record', () => storyRecordWith(422, 'Unprocessable Entity')],
+    [
+      'a 429 with Retry-After whose body is the story record',
+      () => storyRecordWith(429, 'Too Many Requests', { 'Retry-After': '0' }),
+    ],
+    ['a 500 whose body is the story record', () => storyRecordWith(500, 'Internal Server Error')],
+    ['a 502 whose body is the story record', () => storyRecordWith(502, 'Bad Gateway')],
+    ['a JSON null', () => jsonResponse(null, 200, 'OK')],
+  ])(
+    'still fails not_tabular naming the ID when the lookup answers %s — one 403, one lookup',
+    async (_label, discovery) => {
+      route(() => Promise.resolve(discovery()));
+
+      const err = await rejectionOf(svc.queryDataset(STORY, createMockContext()));
+
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toEqual(unlisted);
+      expect(err.message).toBe(
+        '9hpx-asd8 on data.ny.gov has no queryable rows: SODA refused row access, as it does for a story, file, link, or other non-tabular asset.',
+      );
+      expect(sodaCalls()).toHaveLength(1);
+      expect(discoveryCalls()).toHaveLength(1);
+    },
+  );
+
+  it('still fails not_tabular when the lookup fails on the network', async () => {
+    route(() => Promise.reject(new TypeError('fetch failed')));
+
+    const err = await rejectionOf(svc.queryDataset(STORY, createMockContext()));
+
+    expect(err.data).toEqual(unlisted);
+    expect(sodaCalls()).toHaveLength(1);
+  });
+
+  it('does not wait out a Retry-After on the lookup: its 429 leaves not_tabular at once', async () => {
+    vi.useFakeTimers();
+    route(() =>
+      Promise.resolve(storyRecordWith(429, 'Too Many Requests', { 'Retry-After': '30' })),
+    );
+
+    const { state, outcome } = track(svc.queryDataset(STORY, createMockContext()));
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    expect(((await outcome).error as McpError).data).toEqual(unlisted);
+    expect(sodaCalls()).toHaveLength(1);
+    expect(discoveryCalls()).toHaveLength(1);
+  });
+
+  it('abandons a hung lookup at its 2.5 s bound and fails not_tabular then', async () => {
+    vi.useFakeTimers();
+    route(hangUntilAborted);
+
+    const { state, outcome } = track(svc.queryDataset(STORY, createMockContext()));
+    await vi.advanceTimersByTimeAsync(2_499);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    const { error } = await outcome;
+    expect(error).toBeInstanceOf(McpError);
+    expect((error as McpError).data).toEqual(unlisted);
+    expect(sodaCalls()).toHaveLength(1);
+    expect(discoveryCalls()).toHaveLength(1);
+  });
+
+  it('cuts the lookup at what is left of the call deadline when that is under 2.5 s', async () => {
+    vi.useFakeTimers();
+    // The 403 takes 49 s, leaving the lookup 1 s.
+    fetchSpy.mockImplementation((input, init) =>
+      originOf(input) === DISCOVERY_ORIGIN
+        ? hangUntilAborted(input, init)
+        : answerAfter(49_000, refusal)(input, init),
+    );
+
+    const { state, outcome } = track(svc.queryDataset(STORY, createMockContext()));
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    expect(((await outcome).error as McpError).data).toEqual(unlisted);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails as cancelled, not not_tabular, when the caller aborts during the lookup', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('Caller cancelled the query', 'AbortError');
+    route((input, init) => {
+      controller.abort(cancellation);
+      return hangUntilAborted(input, init);
+    });
+
+    const err = await svc
+      .queryDataset(STORY, createMockContext({ signal: controller.signal }))
+      .catch((e: unknown) => e);
+
+    expect(err).toBe(cancellation);
+    expect(sodaCalls()).toHaveLength(1);
   });
 });
 
@@ -2223,6 +2470,431 @@ describe('SocrataService soql_error message and data (#29)', () => {
   });
 });
 
+describe('SocrataService soql_error columns from one bare field-type read (#73)', () => {
+  let fetchSpy: MockInstance<typeof fetch>;
+  const svc = new SocrataService();
+
+  beforeEach(() => {
+    mockGetServerConfig.mockReturnValue({ defaultDomain: 'data.seattle.gov' });
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  const CHICAGO = { domain: 'data.cityofchicago.org', datasetId: 'ijzp-q8t2', limit: 2 };
+  const NYC_PERMITS = { domain: 'data.cityofnewyork.us', datasetId: 'ipu4-2q9a', limit: 2 };
+
+  /** A bare `$limit=0` answer as live: 200, body `[]`, every field's type in the headers. */
+  const bareRows = (fields: string[], types: string[]) =>
+    jsonResponse([], 200, 'OK', {
+      'X-SODA2-Fields': JSON.stringify(fields),
+      'X-SODA2-Types': JSON.stringify(types),
+    });
+  const chicagoFields = () => bareRows(IJZP_FIELDS, IJZP_TYPES);
+
+  /** The headers a successful bare read carries, on an answer whose status must still not count. */
+  const FIELD_HEADERS = {
+    'X-SODA2-Fields': JSON.stringify(IJZP_FIELDS),
+    'X-SODA2-Types': JSON.stringify(IJZP_TYPES),
+  };
+
+  /** True for the field-type read: the row endpoint with `$limit=0` and nothing else. */
+  const isBareRead = (input: unknown) => new URL(String(input)).search === '?%24limit=0';
+  const bareReads = () => fetchSpy.mock.calls.filter((c) => isBareRead(c[0]));
+
+  /** The query answers HTTP 400 with `body`; the bare read answers with `bare`. */
+  function route(
+    body: unknown,
+    bare: (input: unknown, init?: RequestInit) => Promise<Response> = () =>
+      Promise.resolve(chicagoFields()),
+  ) {
+    fetchSpy.mockImplementation((input, init) =>
+      isBareRead(input)
+        ? bare(input, init)
+        : Promise.resolve(jsonResponse(body, 400, 'Bad Request')),
+    );
+  }
+
+  it.each([
+    [
+      'district = 11 (a text column)',
+      CHICAGO,
+      { where: 'district = 11' },
+      SOQL_400.districtEquals11,
+      chicagoFields,
+      [{ field_name: 'district', type: 'text' }],
+    ],
+    [
+      "id like '1234567%' (a number column)",
+      CHICAGO,
+      { where: "id like '1234567%'" },
+      SOQL_400.idLike,
+      chicagoFields,
+      [{ field_name: 'id', type: 'number' }],
+    ],
+    [
+      'date_extract_y(issuance_date) (a text column)',
+      NYC_PERMITS,
+      { select: 'date_extract_y(issuance_date) as yr' },
+      SOQL_400.dateExtractOnText,
+      () => bareRows(IPU4_FIELDS, IPU4_TYPES),
+      [{ field_name: 'issuance_date', type: 'text' }],
+    ],
+  ])(
+    'a type mismatch on %s carries the referenced columns and their types',
+    async (_label, target, clauses, body, fields, referenced) => {
+      route(body, () => Promise.resolve(fields()));
+
+      const err = await rejectionOf(
+        svc.queryDataset({ ...target, ...clauses }, createMockContext()),
+      );
+
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.message).toBe(`SoQL error: ${body.message.split('; position: Map(')[0]}`);
+      expect(err.data).toEqual({
+        reason: 'soql_error',
+        socrataCode: 'query.soql.type-mismatch',
+        referenced_columns: referenced,
+      });
+      // The query, then one bare read of the same dataset with no clauses.
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(String(bareReads()[0]?.[0])).toBe(
+        `https://${target.domain}/resource/${target.datasetId}.json?%24limit=0`,
+      );
+    },
+  );
+
+  it('reads the select, where, group, having, and order clauses, never search', async () => {
+    route(SOQL_400.districtEquals11);
+
+    // Each clause names one field no other clause names, so a clause left unread loses its field.
+    const err = await rejectionOf(
+      svc.queryDataset(
+        {
+          ...CHICAGO,
+          search: 'block arrest',
+          select: 'iucr, count(*) as n',
+          where: "primary_type = 'THEFT'",
+          group: 'district',
+          having: 'max(ward) > 1',
+          order: 'year',
+        },
+        createMockContext(),
+      ),
+    );
+
+    expect(err.data?.referenced_columns).toEqual([
+      { field_name: 'iucr', type: 'text' },
+      { field_name: 'primary_type', type: 'text' },
+      { field_name: 'district', type: 'text' },
+      { field_name: 'ward', type: 'number' },
+      { field_name: 'year', type: 'number' },
+    ]);
+  });
+
+  it.each([
+    ['primary_description', ['primary_type', 'description', 'location_description']],
+    ['distrct', ['district']],
+    ['comunity_area', ['community_area']],
+  ])('an unknown column %s carries the similar field names', async (token, similar) => {
+    route(token === 'primary_description' ? SOQL_400.primaryDescription : noSuchColumn(token));
+
+    const err = await rejectionOf(
+      svc.queryDataset({ ...CHICAGO, select: `id, ${token}` }, createMockContext()),
+    );
+
+    expect(err.data).toEqual({
+      reason: 'soql_error',
+      socrataCode: 'query.soql.no-such-column',
+      column: token,
+      similar_columns: similar,
+    });
+    expect(bareReads()).toHaveLength(1);
+  });
+
+  it('an unknown column nothing resembles keeps the error as it is (Manhattan)', async () => {
+    route(noSuchColumn('Manhattan'));
+
+    const err = await rejectionOf(
+      svc.queryDataset({ ...CHICAGO, where: 'block = Manhattan' }, createMockContext()),
+    );
+
+    expect(err.data).toEqual({
+      reason: 'soql_error',
+      socrataCode: 'query.soql.no-such-column',
+      column: 'Manhattan',
+    });
+    expect(bareReads()).toHaveLength(1);
+  });
+
+  it('a type mismatch whose clauses name no field keeps the error as it is', async () => {
+    route(SOQL_400.districtEquals11);
+
+    const err = await rejectionOf(
+      svc.queryDataset({ ...CHICAGO, select: "'a' || 1 as x" }, createMockContext()),
+    );
+
+    expect(err.data).toEqual({ reason: 'soql_error', socrataCode: 'query.soql.type-mismatch' });
+  });
+
+  it.each([
+    ['an unknown function', SOQL_400.noSuchFunction, 'query.soql.no-such-function'],
+    ['a parse error', SOQL_BODIES.malformed, 'query.compiler.malformed'],
+    [
+      'an unmapped code naming a column',
+      {
+        message:
+          "Query coordinator error: query.soql.column-not-in-group-bys; Column 'beat' is not in group by",
+        errorCode: 'query.soql.column-not-in-group-bys',
+        data: { column: 'beat' },
+      },
+      'query.soql.column-not-in-group-bys',
+    ],
+    [
+      'an unknown column without data.column',
+      {
+        message: 'Query coordinator error: query.soql.no-such-column',
+        errorCode: 'query.soql.no-such-column',
+      },
+      'query.soql.no-such-column',
+    ],
+  ])('%s makes no extra request', async (_label, body, socrataCode) => {
+    route(body);
+
+    const err = await rejectionOf(
+      svc.queryDataset(
+        { ...CHICAGO, select: 'substr(case_number, 1, 2) as p' },
+        createMockContext(),
+      ),
+    );
+
+    expect(err.data).toMatchObject({ reason: 'soql_error', socrataCode });
+    expect(err.data).not.toHaveProperty('referenced_columns');
+    expect(err.data).not.toHaveProperty('similar_columns');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  /** A type mismatch whose read added nothing: the error exactly as #29 left it. */
+  const plainMismatch = { reason: 'soql_error', socrataCode: 'query.soql.type-mismatch' };
+
+  it.each([
+    [
+      'a 404',
+      () =>
+        jsonResponse({ code: 'not_found', error: true, message: 'Not found' }, 404, 'Not Found'),
+    ],
+    ['a gateway 403', () => htmlResponse(403, 'Forbidden')],
+    [
+      'a 429',
+      () => jsonResponse({ message: 'slow' }, 429, 'Too Many Requests', { 'Retry-After': '0' }),
+    ],
+    ['a 5xx', () => new Response('busy', { status: 503, statusText: 'Service Unavailable' })],
+    [
+      'no X-SODA2-Types header',
+      () => jsonResponse([], 200, 'OK', { 'X-SODA2-Fields': '["district"]' }),
+    ],
+    [
+      'unpaired headers',
+      () =>
+        jsonResponse([], 200, 'OK', {
+          'X-SODA2-Fields': '["id","district"]',
+          'X-SODA2-Types': '["number"]',
+        }),
+    ],
+    [
+      'headers that are not JSON arrays',
+      () => jsonResponse([], 200, 'OK', { 'X-SODA2-Fields': 'district', 'X-SODA2-Types': 'text' }),
+    ],
+    ['no field headers at all', () => jsonResponse([], 200, 'OK')],
+    [
+      'a SODA 403 that carries field headers',
+      () =>
+        jsonResponse(
+          { code: 'permission_denied', error: true, message: 'Forbidden' },
+          403,
+          'Forbidden',
+          FIELD_HEADERS,
+        ),
+    ],
+    [
+      'a 422 that carries field headers',
+      () => jsonResponse({ message: 'x' }, 422, 'Unprocessable Entity', FIELD_HEADERS),
+    ],
+    [
+      'a 429 without Retry-After that carries field headers',
+      () => jsonResponse({ message: 'slow' }, 429, 'Too Many Requests', FIELD_HEADERS),
+    ],
+    [
+      'a 500 that carries field headers',
+      () => jsonResponse({ message: 'x' }, 500, 'Internal Server Error', FIELD_HEADERS),
+    ],
+    [
+      'a 502 that carries field headers',
+      () => jsonResponse({ message: 'x' }, 502, 'Bad Gateway', FIELD_HEADERS),
+    ],
+    ['an HTML 200 page', () => htmlResponse(200, 'OK')],
+  ])(
+    'keeps the soql_error as it is when the bare read answers %s — one attempt, no retry',
+    async (_label, bare) => {
+      route(SOQL_400.districtEquals11, () => Promise.resolve(bare()));
+
+      const err = await rejectionOf(
+        svc.queryDataset({ ...CHICAGO, where: 'district = 11' }, createMockContext()),
+      );
+
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toEqual(plainMismatch);
+      expect(bareReads()).toHaveLength(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('keeps the soql_error as it is when the bare read fails on the network', async () => {
+    route(SOQL_400.districtEquals11, () => Promise.reject(new TypeError('fetch failed')));
+
+    const err = await rejectionOf(
+      svc.queryDataset({ ...CHICAGO, where: 'district = 11' }, createMockContext()),
+    );
+
+    expect(err.data).toEqual(plainMismatch);
+    expect(bareReads()).toHaveLength(1);
+  });
+
+  it('does not wait out a Retry-After on the bare read: its 429 leaves the soql_error at once', async () => {
+    vi.useFakeTimers();
+    route(SOQL_400.districtEquals11, () =>
+      Promise.resolve(
+        jsonResponse({ message: 'slow' }, 429, 'Too Many Requests', {
+          'Retry-After': '30',
+          ...FIELD_HEADERS,
+        }),
+      ),
+    );
+
+    const { state, outcome } = track(
+      svc.queryDataset({ ...CHICAGO, where: 'district = 11' }, createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    expect(((await outcome).error as McpError).data).toEqual(plainMismatch);
+    expect(bareReads()).toHaveLength(1);
+  });
+
+  it('waits for a bare read slower than 2.5 s and names the columns (live: 0.3–11.8 s)', async () => {
+    vi.useFakeTimers();
+    route(SOQL_400.districtEquals11, answerAfter(9_928, chicagoFields));
+
+    const { state, outcome } = track(
+      svc.queryDataset({ ...CHICAGO, where: 'district = 11' }, createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(9_928);
+
+    expect(state.settled).toBe(true);
+    expect(((await outcome).error as McpError).data?.referenced_columns).toEqual([
+      { field_name: 'district', type: 'text' },
+    ]);
+    expect(bareReads()).toHaveLength(1);
+  });
+
+  it('abandons a hung bare read at its 15 s bound and fails soql_error then', async () => {
+    vi.useFakeTimers();
+    route(SOQL_400.districtEquals11, hangUntilAborted);
+
+    const { state, outcome } = track(
+      svc.queryDataset({ ...CHICAGO, where: 'district = 11' }, createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    expect(((await outcome).error as McpError).data).toEqual(plainMismatch);
+    expect(bareReads()).toHaveLength(1);
+  });
+
+  it('cuts the bare read at what is left of the call deadline when that is under 15 s', async () => {
+    vi.useFakeTimers();
+    // The 400 takes 49 s, leaving the read 1 s.
+    fetchSpy.mockImplementation((input, init) =>
+      isBareRead(input)
+        ? hangUntilAborted(input, init)
+        : answerAfter(49_000, () => jsonResponse(SOQL_400.districtEquals11, 400, 'Bad Request'))(
+            input,
+            init,
+          ),
+    );
+
+    const { state, outcome } = track(
+      svc.queryDataset({ ...CHICAGO, where: 'district = 11' }, createMockContext()),
+    );
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state.settled).toBe(true);
+    expect(((await outcome).error as McpError).data).toEqual(plainMismatch);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails as cancelled, not soql_error, when the caller aborts during the bare read', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('Caller cancelled the query', 'AbortError');
+    route(noSuchColumn('distrct'), (input, init) => {
+      controller.abort(cancellation);
+      return hangUntilAborted(input, init);
+    });
+
+    const err = await svc
+      .queryDataset(
+        { ...CHICAGO, select: 'distrct' },
+        createMockContext({ signal: controller.signal }),
+      )
+      .catch((e: unknown) => e);
+
+    expect(err).toBe(cancellation);
+  });
+
+  describe('requests that make no read (characterization)', () => {
+    it('a staging copy that answers a 400 fails as soql_error after one request', async () => {
+      route(SOQL_400.districtEquals11);
+
+      const err = await rejectionOf(
+        svc.fetchStagingRows({ ...CHICAGO, where: 'district = 11' }, 50_000, createMockContext()),
+      );
+
+      expect(err.data).toEqual(plainMismatch);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('a recount that answers a 400 leaves total_count out after one request', async () => {
+      fetchSpy.mockImplementation((input) =>
+        Promise.resolve(
+          new URL(String(input)).searchParams.has('$query')
+            ? jsonResponse(SOQL_400.districtEquals11, 400, 'Bad Request')
+            : jsonResponse([{ id: '1' }, { id: '2' }], 200, 'OK', {
+                'X-SODA2-Fields': '["id"]',
+                'X-SODA2-Types': '["number"]',
+              }),
+        ),
+      );
+
+      const result = await svc.queryDataset(
+        { ...CHICAGO, where: "district = '011'" },
+        createMockContext(),
+      );
+
+      expect(result.rowCount).toBe(2);
+      expect(result).not.toHaveProperty('totalCount');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
 describe('SocrataService.findDatasets column_names mapping (#29)', () => {
   let fetchSpy: MockInstance<typeof fetch>;
   const svc = new SocrataService();
@@ -2737,6 +3409,223 @@ describe('hosts that do not serve the SODA API (#37, #38, #39)', () => {
 
       expect((err as McpError).data).toMatchObject({ reason: 'unknown_domain' });
       expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a same-host views record that names another dataset ID (#70)', () => {
+    /**
+     * data.nj.gov `/api/views/5it6-gc2r.json` (live 2026-11-08, trimmed): HTTP 200
+     * from the requested host, no redirect, carrying `t6tk-mr48`'s `id`. The
+     * columns are the ones `/resource/5it6-gc2r.json` serves — `geocoded_column`
+     * a `point` with `geocoded_column_*` text subcolumns — where `t6tk-mr48`'s own
+     * record has a `location`. The alias is not in the Discovery catalog.
+     */
+    const NJ_ALIAS_VIEWS = {
+      id: 't6tk-mr48',
+      name: 'Vehicle Inspection Facility Locations',
+      assetType: 'dataset',
+      category: 'Transportation',
+      columns: [
+        {
+          id: 415305755,
+          fieldName: 'lic_id',
+          dataTypeName: 'text',
+          renderTypeName: 'text',
+          cachedContents: { non_null: '1154', null: '0' },
+        },
+        {
+          id: 415305771,
+          fieldName: 'geocoded_column',
+          dataTypeName: 'point',
+          renderTypeName: 'point',
+          cachedContents: { non_null: '1129', null: '25' },
+        },
+        {
+          id: 415305772,
+          fieldName: 'geocoded_column_address',
+          dataTypeName: 'text',
+          renderTypeName: 'text',
+          cachedContents: { non_null: '1129', null: '25' },
+        },
+        {
+          id: 415305776,
+          fieldName: ':@computed_region_afba_4m32',
+          dataTypeName: 'number',
+          renderTypeName: 'number',
+        },
+      ],
+    };
+
+    /** Views requests answer `views()`; Discovery `?ids=` lists nothing, as live for the alias. */
+    function serve(views: () => Response) {
+      fetchSpy.mockImplementation((input) =>
+        Promise.resolve(
+          originOf(input) === DISCOVERY_ORIGIN
+            ? discoveryIdsResponse(undefined, '5it6-gc2r')
+            : views(),
+        ),
+      );
+    }
+
+    const ALIAS_COLUMNS = [
+      { fieldName: 'lic_id', dataType: 'text', nonNullCount: 1154 },
+      { fieldName: 'geocoded_column', dataType: 'point', nonNullCount: 1129 },
+      { fieldName: 'geocoded_column_address', dataType: 'text', nonNullCount: 1129 },
+    ];
+
+    it('is the dataset: one views request, the requested ID kept, the record’s id as canonicalDatasetId', async () => {
+      serve(() => jsonResponse(NJ_ALIAS_VIEWS, 200, 'OK'));
+
+      const meta = await svc.getDataset('data.nj.gov', '5it6-gc2r', createMockContext());
+
+      expect(meta).toMatchObject({
+        datasetId: '5it6-gc2r',
+        canonicalDatasetId: 't6tk-mr48',
+        domain: 'data.nj.gov',
+        name: 'Vehicle Inspection Facility Locations',
+        assetType: 'dataset',
+        category: 'Transportation',
+      });
+      expect(meta.columns).toEqual(ALIAS_COLUMNS);
+      expect(sodaCalls().map((c) => String(c[0]))).toEqual([
+        'https://data.nj.gov/api/views/5it6-gc2r.json',
+      ]);
+      // A success, so the not_found Discovery lookup never runs.
+      expect(discoveryCalls()).toHaveLength(0);
+    });
+
+    it('accepts a sparse record — name and columns are not conditions', async () => {
+      serve(() => jsonResponse({ id: 't6tk-mr48' }, 200, 'OK'));
+
+      const meta = await svc.getDataset('data.nj.gov', '5it6-gc2r', createMockContext());
+
+      expect(meta).toMatchObject({
+        datasetId: '5it6-gc2r',
+        canonicalDatasetId: 't6tk-mr48',
+        name: '',
+        columns: [],
+      });
+      expect(discoveryCalls()).toHaveLength(0);
+    });
+
+    it('carries no canonicalDatasetId when the record echoes the requested ID (characterization)', async () => {
+      serve(() => jsonResponse({ ...NJ_ALIAS_VIEWS, id: '5it6-gc2r' }, 200, 'OK'));
+
+      const meta = await svc.getDataset('data.nj.gov', '5it6-gc2r', createMockContext());
+
+      expect(meta.datasetId).toBe('5it6-gc2r');
+      expect(meta).not.toHaveProperty('canonicalDatasetId');
+      expect(meta.columns).toEqual(ALIAS_COLUMNS);
+    });
+
+    it.each([
+      ['a number', 415305754],
+      ['null', null],
+      ['an empty string', ''],
+      ['a four-by-four with a suffix', 't6tk-mr48-x'],
+      ['a display name', 'Vehicle Inspection Facility Locations'],
+    ])(
+      'stays not_found, with the Discovery lookup, when the record’s id is %s (characterization)',
+      async (_l, id) => {
+        serve(() => jsonResponse({ ...NJ_ALIAS_VIEWS, id }, 200, 'OK'));
+
+        const err = await rejectionOf(
+          svc.getDataset('data.nj.gov', '5it6-gc2r', createMockContext()),
+        );
+
+        expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(err.message).toBe('Dataset 5it6-gc2r not found on data.nj.gov.');
+        expect(err.data).toMatchObject({
+          reason: 'not_found',
+          domain: 'data.nj.gov',
+          dataset_id: '5it6-gc2r',
+        });
+        expect(sodaCalls()).toHaveLength(1);
+        expect(discoveryCalls()).toHaveLength(1);
+      },
+    );
+
+    it('an off-host redirect whose record names another four-by-four stays unknown_domain on the first attempt (characterization)', async () => {
+      fetchSpy.mockImplementation(() =>
+        Promise.resolve(
+          redirectedResponse(
+            jsonResponse({ id: 'abcd-1234', name: 'Another dataset', columns: [] }, 200, 'OK'),
+            'https://data.sf.gov/api/views/wg3w-h783.json',
+          ),
+        ),
+      );
+
+      const err = await rejectionOf(
+        svc.getDataset('data.sfgov.org', 'wg3w-h783', createMockContext()),
+      );
+
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err.data).toMatchObject({
+        reason: 'unknown_domain',
+        host: 'data.sfgov.org',
+        redirectedTo: 'data.sf.gov',
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('a same-host redirect whose record names another four-by-four is accepted, as an answer from the host itself (characterization)', async () => {
+      fetchSpy.mockImplementation(() =>
+        Promise.resolve(
+          redirectedResponse(
+            jsonResponse(NJ_ALIAS_VIEWS, 200, 'OK'),
+            'https://data.nj.gov/api/views/t6tk-mr48.json',
+          ),
+        ),
+      );
+
+      const meta = await svc.getDataset('data.nj.gov', '5it6-gc2r', createMockContext());
+
+      expect(meta).toMatchObject({ datasetId: '5it6-gc2r', canonicalDatasetId: 't6tk-mr48' });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('is accepted on a retried attempt after a transient 503', async () => {
+      let views = 0;
+      serve(() =>
+        ++views === 1
+          ? jsonResponse({ message: 'upstream unavailable' }, 503, 'Service Unavailable')
+          : jsonResponse(NJ_ALIAS_VIEWS, 200, 'OK'),
+      );
+
+      vi.useFakeTimers();
+      const settled = svc
+        .getDataset('data.nj.gov', '5it6-gc2r', createMockContext())
+        .catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(await settled).toMatchObject({
+        datasetId: '5it6-gc2r',
+        canonicalDatasetId: 't6tk-mr48',
+      });
+      expect(sodaCalls()).toHaveLength(2);
+      expect(discoveryCalls()).toHaveLength(0);
+    });
+
+    it('is accepted on the keyless repeat after the app token is rejected', async () => {
+      mockGetServerConfig.mockReturnValue({ appToken: 'tok', defaultDomain: 'data.seattle.gov' });
+      // Fresh instance so the shared one keeps its token enabled.
+      const fresh = new SocrataService();
+      let views = 0;
+      serve(() =>
+        ++views === 1
+          ? jsonResponse(
+              { code: 'permission_denied', error: true, message: 'Invalid app_token specified' },
+              403,
+              'Forbidden',
+            )
+          : jsonResponse(NJ_ALIAS_VIEWS, 200, 'OK'),
+      );
+
+      const meta = await fresh.getDataset('data.nj.gov', '5it6-gc2r', createMockContext());
+
+      expect(meta).toMatchObject({ datasetId: '5it6-gc2r', canonicalDatasetId: 't6tk-mr48' });
+      expect(sodaCalls()).toHaveLength(2);
+      expect(discoveryCalls()).toHaveLength(0);
     });
   });
 

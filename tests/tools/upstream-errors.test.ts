@@ -19,6 +19,14 @@ import { listPortals } from '@/mcp-server/tools/definitions/list-portals.tool.js
 import { queryDataset } from '@/mcp-server/tools/definitions/query-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import { initSocrataService, resetPortalCountCache } from '@/services/socrata/socrata-service.js';
+import {
+  IJZP_FIELDS,
+  IJZP_TYPES,
+  IPU4_FIELDS,
+  IPU4_TYPES,
+  noSuchColumn,
+  SOQL_400,
+} from '../services/soql-captures.js';
 import { contentText } from './content-text.js';
 
 // The input schemas read the real activeServerConfig(): the schema defaults, since nothing parses.
@@ -283,7 +291,10 @@ describe('URL-shaped and malformed domains (#35)', () => {
     expect(error.data.recovery?.hint).toContain('only: "datasets"');
     expect(text).toContain('reason not_tabular');
     expect(text).toContain('only: "datasets"');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // One 403, never retried, and one Discovery lookup (#74), which this mock answers with the same 403.
+    const sodaRequests = fetchSpy.mock.calls.filter((c) => originOf(c[0]) !== DISCOVERY_ORIGIN);
+    expect(sodaRequests).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
   it('socrata_query_dataset reports the normalized domain on both surfaces', async () => {
     fetchSpy.mockImplementation(() => Promise.resolve(json([{ a: '1' }])));
@@ -576,7 +587,12 @@ describe('socrata_query_dataset soql_error recovery chosen per upstream code (#2
     },
   } as const;
 
-  async function querying(body: unknown, input: Record<string, unknown>) {
+  /**
+   * Every request answers `body` with HTTP 400 — the field-type read a type
+   * mismatch or a named unknown column makes (#73) included, so that read
+   * fails and the column-free hint stands. `requests` counts both.
+   */
+  async function querying(body: unknown, input: Record<string, unknown>, requests = 1) {
     fetchSpy.mockImplementation(() => Promise.resolve(json(body, 400)));
     const result = errorOf(
       await runToolContract(queryDataset, {
@@ -591,8 +607,11 @@ describe('socrata_query_dataset soql_error recovery chosen per upstream code (#2
     expect(result.error.message).not.toContain('position: Map(');
     expect(result.text).not.toContain('position: Map(');
     expect(result.text).toContain('reason soql_error');
-    expect(result.text).toContain(result.error.data.recovery?.hint ?? '<no hint>');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // A cast a hint names renders as a code span in content[] (#73).
+    expect(result.text.replaceAll('`', '')).toContain(
+      result.error.data.recovery?.hint ?? '<no hint>',
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(requests);
     return result;
   }
 
@@ -611,7 +630,7 @@ describe('socrata_query_dataset soql_error recovery chosen per upstream code (#2
   });
 
   it('an unquoted text value names the token and gives both fixes', async () => {
-    const { error, text } = await querying(bodies.noSuchColumn, { where: 'boro=Manhattan' });
+    const { error, text } = await querying(bodies.noSuchColumn, { where: 'boro=Manhattan' }, 2);
 
     expect(error.data.socrataCode).toBe('query.soql.no-such-column');
     expect(error.data.column).toBe('Manhattan');
@@ -624,14 +643,19 @@ describe('socrata_query_dataset soql_error recovery chosen per upstream code (#2
     expect(text).toContain('No such column: Manhattan');
   });
 
-  it('a bare number against a Text column gets the quoting rule', async () => {
-    const { error } = await querying(bodies.typeMismatch, { where: 'boro=5' });
+  it('a type mismatch without field types gets the quoting rule and the casts', async () => {
+    const { error, text } = await querying(bodies.typeMismatch, { where: 'boro=5' }, 2);
 
     expect(error.data.socrataCode).toBe('query.soql.type-mismatch');
+    expect(error.data).not.toHaveProperty('referenced_columns');
     const hint = error.data.recovery?.hint ?? '';
+    expect(hint).toMatch(/^An operator or function got a value of the wrong type\./);
     expect(hint).toContain('data_type');
     expect(hint).toContain("single-quoted strings (year='2020')");
+    expect(hint).toContain('a quoted value matches only as stored');
     expect(hint).toContain('bare literals (year=2020)');
+    expect(hint).toContain('col::number, col::text, or col::floating_timestamp');
+    expect(text).toContain('`col::number`, `col::text`, or `col::floating_timestamp`');
   });
 
   it('an unmapped code falls back to the declared generic recovery', async () => {
@@ -654,6 +678,164 @@ describe('socrata_query_dataset soql_error recovery chosen per upstream code (#2
     expect(hint).toMatch(/^An identifier is not a column/);
     expect(hint).toContain('field_name');
     expect(hint).toContain('single-quote');
+  });
+});
+
+describe('socrata_query_dataset soql_error names the columns behind the fix (#73)', () => {
+  const CHICAGO = { domain: 'data.cityofchicago.org', dataset_id: 'ijzp-q8t2' };
+
+  /** A bare `$limit=0` answer as live: body `[]`, every field's type in the headers. */
+  const bareRows = (fields: string[], types: string[]) => () =>
+    json([], 200, {
+      'X-SODA2-Fields': JSON.stringify(fields),
+      'X-SODA2-Types': JSON.stringify(types),
+    });
+  const chicagoFields = bareRows(IJZP_FIELDS, IJZP_TYPES);
+  const isBareRead = (input: unknown) => new URL(String(input)).search === '?%24limit=0';
+
+  /** The query answers HTTP 400 with `body`; the field-type read answers `bare()`. */
+  async function failing(
+    body: unknown,
+    bare: () => Response,
+    target: { domain: string; dataset_id: string },
+    clauses: Record<string, string>,
+  ) {
+    fetchSpy.mockImplementation((input) =>
+      Promise.resolve(isBareRead(input) ? bare() : json(body, 400)),
+    );
+    return errorOf(
+      await runToolContract(queryDataset, { ...target, limit: 2, stage: false, ...clauses }),
+    );
+  }
+
+  const RULES =
+    "Text columns need single-quoted strings (year='2020'), and a quoted value matches only as stored; Number columns use bare literals (year=2020).";
+
+  it.each([
+    [
+      'district = 11',
+      SOQL_400.districtEquals11,
+      chicagoFields,
+      CHICAGO,
+      { where: 'district = 11' },
+      { field_name: 'district', type: 'text' },
+      ['district::number', 'district::floating_timestamp'],
+    ],
+    [
+      "id like '1234567%'",
+      SOQL_400.idLike,
+      chicagoFields,
+      CHICAGO,
+      { where: "id like '1234567%'" },
+      { field_name: 'id', type: 'number' },
+      ['id::text', 'id::floating_timestamp'],
+    ],
+    [
+      'date_extract_y(issuance_date) as yr',
+      SOQL_400.dateExtractOnText,
+      bareRows(IPU4_FIELDS, IPU4_TYPES),
+      { domain: 'data.cityofnewyork.us', dataset_id: 'ipu4-2q9a' },
+      { select: 'date_extract_y(issuance_date) as yr' },
+      { field_name: 'issuance_date', type: 'text' },
+      ['issuance_date::number', 'issuance_date::floating_timestamp'],
+    ],
+  ])(
+    'a type mismatch on %s names the column, its type, and the casts to its other types on both surfaces',
+    async (_label, body, bare, target, clauses, column, [castA, castB]) => {
+      const { error, text } = await failing(body, bare, target, clauses);
+      const name = column.field_name;
+
+      expect(error.data).toMatchObject({
+        reason: 'soql_error',
+        socrataCode: 'query.soql.type-mismatch',
+        referenced_columns: [column],
+      });
+      // A cast to the column's own type repeats the mismatch, so it is never offered.
+      expect(error.data.recovery?.hint).toBe(
+        `The query names ${name} (${column.type}). ${RULES} To use a column as another type, cast it: ${castA} or ${castB}.`,
+      );
+      // Each field name and cast renders as code, so it reads back without escapes.
+      expect(text).toContain(
+        `Recovery: The query names \`${name}\` (${column.type}). ${RULES} To use a column as another type, cast it: \`${castA}\` or \`${castB}\`.`,
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('an unknown function points at the SoQL function list, with no extra request', async () => {
+    const { error, text } = await failing(SOQL_400.noSuchFunction, chicagoFields, CHICAGO, {
+      select: 'substr(case_number, 1, 2) as p',
+    });
+    const hint = error.data.recovery?.hint ?? '';
+
+    expect(error.data.socrataCode).toBe('query.soql.no-such-function');
+    expect(hint).toBe(
+      'SoQL has no function by that name. A cast is written col::type, such as col::number, not as a function. The functions SoQL supports are listed at https://dev.socrata.com/docs/functions/.',
+    );
+    expect(hint).not.toContain('field_name');
+    expect(hint).not.toContain('quot');
+    expect(text).toContain('https://dev.socrata.com/docs/functions/');
+    expect(text).toContain('`col::type`');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      'primary_description',
+      SOQL_400.primaryDescription,
+      ['primary_type', 'description', 'location_description'],
+    ],
+    ['distrct', noSuchColumn('distrct'), ['district']],
+    ['comunity_area', noSuchColumn('comunity_area'), ['community_area']],
+  ])(
+    'an unknown column %s names the similar field names on both surfaces',
+    async (token, body, similar) => {
+      const { error, text } = await failing(body, chicagoFields, CHICAGO, {
+        select: `id, ${token}`,
+      });
+
+      expect(error.data).toMatchObject({ column: token, similar_columns: similar });
+      expect(error.data.recovery?.hint).toBe(
+        `"${token}" is not a column. Similar field names: ${similar.join(', ')}. If it is a text value, single-quote it ('${token}').`,
+      );
+      expect(text).toContain(
+        `Similar field names: ${similar.map((name) => `\`${name}\``).join(', ')}.`,
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('an unknown column nothing resembles keeps the token-and-both-fixes hint (Manhattan)', async () => {
+    const { error } = await failing(noSuchColumn('Manhattan'), chicagoFields, CHICAGO, {
+      where: 'block = Manhattan',
+    });
+
+    expect(error.data).not.toHaveProperty('similar_columns');
+    expect(error.data.recovery?.hint).toBe(
+      `"Manhattan" is not a column. If it names a column, use its API field_name from socrata_get_dataset; if it is a text value, single-quote it ('Manhattan').`,
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a caller abort during the field-type read as cancelled, not as a soql_error', async () => {
+    const controller = new AbortController();
+    fetchSpy.mockImplementation((input, init) => {
+      if (!isBareRead(input)) return Promise.resolve(json(SOQL_400.districtEquals11, 400));
+      controller.abort(new DOMException('Caller cancelled the query', 'AbortError'));
+      return hangUntilAborted(input, init);
+    });
+
+    const { error, text } = errorOf(
+      await runToolContract(
+        queryDataset,
+        { ...CHICAGO, where: 'district = 11', stage: false },
+        { context: { signal: controller.signal } },
+      ),
+    );
+
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(text).toContain('Caller cancelled the query');
+    expect(text).not.toContain('reason soql_error');
   });
 });
 
@@ -914,6 +1096,169 @@ describe('hosts that do not serve the SODA API reach the caller typed, on the fi
       'Police Department Incident Reports',
     );
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a views record that names another dataset ID is the dataset only from the requested host (#70)', () => {
+  /** data.sfgov.org 301 → data.sf.gov, answering with a record whose `id` is another four-by-four. */
+  const offHostOtherId = () => {
+    const res = json({ id: 'abcd-1234', name: 'Another dataset', columns: [] });
+    Object.defineProperty(res, 'url', { value: 'https://data.sf.gov/api/views/wg3w-h783.json' });
+    Object.defineProperty(res, 'redirected', { value: true });
+    return res;
+  };
+
+  it('the dataset resource and socrata_get_dataset both fail an off-host one as unknown_domain on the first attempt', async () => {
+    fetchSpy.mockImplementation(() => Promise.resolve(offHostOtherId()));
+
+    const { error, text } = errorOf(
+      await runToolContract(getDataset, { domain: 'data.sfgov.org', dataset_id: 'wg3w-h783' }),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'unknown_domain',
+      host: 'data.sfgov.org',
+      redirectedTo: 'data.sf.gov',
+    });
+    expect(error.data.recovery?.hint).toContain('socrata_list_portals');
+    expect(text).toContain('reason unknown_domain');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    const params = datasetResource.params!.parse({
+      domain: 'data.sfgov.org',
+      datasetId: 'wg3w-h783',
+    });
+    await expect(datasetResource.handler(params, createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'unknown_domain', redirectedTo: 'data.sf.gov' },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('socrata_query_dataset on an asset SODA refuses names the tables it is built on (#74)', () => {
+  /** SODA's non-tabular 403 as live for stories (2026-11-08). */
+  const refusal = () =>
+    json({ error: true, message: 'no row or column access to non-tabular tables' }, 403);
+
+  /** Row requests answer `rows()`; Discovery `?ids=` answers with a record carrying `resource`. */
+  function route(rows: () => Response, resource: Record<string, unknown>, domain: string) {
+    fetchSpy.mockImplementation((input) =>
+      Promise.resolve(
+        originOf(input) === DISCOVERY_ORIGIN
+          ? json({ results: [{ resource: { id: 'x', ...resource }, metadata: { domain } }] })
+          : rows(),
+      ),
+    );
+  }
+
+  const sodaRequests = () => fetchSpy.mock.calls.filter((c) => originOf(c[0]) !== DISCOVERY_ORIGIN);
+
+  it.each([
+    [
+      '9hpx-asd8',
+      'data.ny.gov',
+      ['e52k-ymww'],
+      '9hpx-asd8 is a story built on e52k-ymww; query that dataset_id on data.ny.gov.',
+    ],
+    [
+      'k356-mc56',
+      'data.wa.gov',
+      ['qxh8-f4bd'],
+      'k356-mc56 is a story built on qxh8-f4bd; query that dataset_id on data.wa.gov.',
+    ],
+    [
+      'jixs-h7uw',
+      'datahub.transportation.gov',
+      ['ge9b-nbt9', '69qe-yiui', 'tnkn-dmxi', 'pm7p-zhna', 'b55b-fde7'],
+      'jixs-h7uw is a story built on ge9b-nbt9, 69qe-yiui, tnkn-dmxi, pm7p-zhna, b55b-fde7; query one of those dataset_ids on datahub.transportation.gov.',
+    ],
+  ])(
+    '%s on %s names its parents on both surfaces, requesting the 403 once',
+    async (datasetId, domain, parents, hint) => {
+      route(refusal, { type: 'story', parent_fxf: parents }, domain);
+
+      const { error, text } = errorOf(
+        await runToolContract(queryDataset, { domain, dataset_id: datasetId, limit: 2 }),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'not_tabular',
+        host: domain,
+        status: 403,
+        dataset_id: datasetId,
+        asset_type: 'story',
+        parent_dataset_ids: parents,
+        recovery: { hint },
+      });
+      expect(error.message).toBe(
+        `${datasetId} on ${domain} has no queryable rows: SODA refused row access, and the Discovery catalog lists its asset type as story.`,
+      );
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain('asset type as story');
+      expect(sodaRequests()).toHaveLength(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('keeps the declared only: "datasets" recovery for a story the catalog lists no parent for (q5as-kyim)', async () => {
+    route(refusal, { type: 'story', parent_fxf: [] }, 'data.ct.gov');
+
+    const { error, text } = errorOf(
+      await runToolContract(queryDataset, { domain: 'data.ct.gov', dataset_id: 'q5as-kyim' }),
+    );
+
+    expect(error.data).toMatchObject({ reason: 'not_tabular', asset_type: 'story' });
+    expect(error.data).not.toHaveProperty('parent_dataset_ids');
+    expect(error.message).toContain('asset type as story');
+    expect(error.data.recovery?.hint).toContain('only: "datasets"');
+    expect(text).toContain('only: "datasets"');
+  });
+
+  it('a map among those parents answers with the table it is built on (tnkn-dmxi)', async () => {
+    route(
+      () => json([{}, {}], 200, { 'X-SODA2-Fields': '[]', 'X-SODA2-Types': '[]' }),
+      { type: 'map', parent_fxf: ['b55b-fde7'] },
+      'datahub.transportation.gov',
+    );
+
+    const { error } = errorOf(
+      await runToolContract(queryDataset, {
+        domain: 'datahub.transportation.gov',
+        dataset_id: 'tnkn-dmxi',
+        limit: 2,
+      }),
+    );
+
+    expect(error.data.recovery?.hint).toBe(
+      'tnkn-dmxi is a map built on b55b-fde7; query that dataset_id on datahub.transportation.gov.',
+    );
+  });
+
+  it('reports a caller abort during the lookup as cancelled, not as not_tabular', async () => {
+    const controller = new AbortController();
+    fetchSpy.mockImplementation((input, init) => {
+      if (originOf(input) !== DISCOVERY_ORIGIN) return Promise.resolve(refusal());
+      controller.abort(new DOMException('Caller cancelled the query', 'AbortError'));
+      return hangUntilAborted(input, init);
+    });
+
+    const { error, text } = errorOf(
+      await runToolContract(
+        queryDataset,
+        { domain: 'data.ny.gov', dataset_id: '9hpx-asd8' },
+        { context: { signal: controller.signal } },
+      ),
+    );
+
+    // The code alone cannot tell: an aborted call reports RequestCancelled whatever it threw.
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error.message).toContain('Caller cancelled the query');
+    expect(text).toContain('Caller cancelled the query');
+    expect(text).not.toContain('reason not_tabular');
+    expect(text).not.toContain('no queryable rows');
+    expect(sodaRequests()).toHaveLength(1);
   });
 });
 
