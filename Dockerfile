@@ -29,7 +29,9 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # Copy the rest of the source code
 COPY . .
 
-# Published skills are loaded from the application root at runtime.
+# The skills a server publishes (`createApp({ skills: 'skills' })`) are read at
+# runtime from the application root. Created when the project has none, so the
+# production stage's copy below holds with or without one.
 RUN mkdir -p skills
 
 # Build the application
