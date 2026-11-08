@@ -1,6 +1,6 @@
 # socrata-mcp-server - Directory Structure
 
-Generated on: 2026-11-04 04:07:08
+Generated on: 2026-11-08 17:44:02
 
 ```text
 socrata-mcp-server/
@@ -30,6 +30,7 @@ socrata-mcp-server/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
 │   ├── 0.6.x/
+│   ├── 0.7.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -175,6 +176,7 @@ socrata-mcp-server/
 │   ├── services/
 │   │   ├── socrata/
 │   │   │   ├── socrata-service.ts
+│   │   │   ├── soql-columns.ts
 │   │   │   └── types.ts
 │   │   └── canvas-accessor.ts
 │   └── index.ts
@@ -195,25 +197,28 @@ socrata-mcp-server/
 │   ├── scripts/
 │   │   └── clean-mcpb.test.ts
 │   ├── services/
-│   │   └── socrata-service.test.ts
-│   └── tools/
-│       ├── annotations.test.ts
-│       ├── content-text.ts
-│       ├── dataframe-describe.tool.test.ts
-│       ├── dataframe-drop.flag.test.ts
-│       ├── dataframe-drop.tool.test.ts
-│       ├── dataframe-query.tool.test.ts
-│       ├── dataset-id-input.test.ts
-│       ├── find-datasets.tool.test.ts
-│       ├── get-dataset.tool.test.ts
-│       ├── limit-schema.test.ts
-│       ├── list-portals.tool.test.ts
-│       ├── query-dataset.canvas.test.ts
-│       ├── query-dataset.tool.test.ts
-│       ├── read-code-echo.ts
-│       ├── security.test.ts
-│       ├── upstream-errors.test.ts
-│       └── upstream-text.test.ts
+│   │   ├── socrata-service.test.ts
+│   │   ├── soql-captures.ts
+│   │   └── soql-columns.test.ts
+│   ├── tools/
+│   │   ├── annotations.test.ts
+│   │   ├── content-text.ts
+│   │   ├── dataframe-describe.tool.test.ts
+│   │   ├── dataframe-drop.flag.test.ts
+│   │   ├── dataframe-drop.tool.test.ts
+│   │   ├── dataframe-query.tool.test.ts
+│   │   ├── dataset-id-input.test.ts
+│   │   ├── find-datasets.tool.test.ts
+│   │   ├── get-dataset.tool.test.ts
+│   │   ├── limit-schema.test.ts
+│   │   ├── list-portals.tool.test.ts
+│   │   ├── query-dataset.canvas.test.ts
+│   │   ├── query-dataset.tool.test.ts
+│   │   ├── read-code-echo.ts
+│   │   ├── security.test.ts
+│   │   ├── upstream-errors.test.ts
+│   │   └── upstream-text.test.ts
+│   └── linear-cost.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

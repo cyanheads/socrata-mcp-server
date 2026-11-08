@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-11-08 · ⚠️ Breaking
+
+Alias dataset IDs resolve with a canonical_dataset_id, soql_error names the columns and casts behind a type mismatch, and stories report the tables they embed. socrata_dataframe_query now refuses a column alias or CTE name spelled like a DuckDB metadata view.
+
 ## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-11-03
 
 Search results report each asset's type and parent datasets, dataset records report the asset type, socrata_query_dataset takes stage: false to skip canvas staging, and bad environment values stop startup with the banner.
